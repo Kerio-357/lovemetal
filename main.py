@@ -21,7 +21,9 @@ ADAPTIVE AUDIO (class AdaptiveAudio below): the music reacts to how you play.
     a hit restores full volume, a miss cuts it to silence for a moment.
   Create stems with  python tools/make_stems.py  (already done for the three songs).
 
-INPUT: the only way to hit a note is a PINCH (thumb tip + index tip together).
+INPUT (Meta Quest style): aim with the hand - the cursor is anchored to the knuckles,
+  so it stays still while the fingers move - and "click" by tapping thumb tip and
+  index tip together. That pinch is the only way to hit a note.
   HIT = cursor inside the note's hit radius + pinch + inside the note's beat window.
   Hovering does nothing. Sensitivity: pinch_close_thresh in config.py, --pinch, or the
   [ and ] keys while the game runs (P shows the pinch meter).
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import threading
 import time
 from pathlib import Path
 
@@ -74,7 +77,7 @@ def parse_args():
     p.add_argument("--device", default=None, help="inference device: cpu, cuda:0, mps ...")
     p.add_argument("--imgsz", type=int, default=None, help="inference size (320 faster, 640 = trained)")
     p.add_argument("--conf", type=float, default=None, help="min hand detection confidence")
-    p.add_argument("--anchor", choices=["pinch_mid", "index_tip"], default=None,
+    p.add_argument("--anchor", choices=["knuckles", "pinch_mid", "index_tip"], default=None,
                    help="which point drives the cursor")
     p.add_argument("--camera", type=int, default=None, help="camera index")
     p.add_argument("--smoother", choices=["ema", "kalman"], default=None)
@@ -173,6 +176,8 @@ class AdaptiveAudio:
         self._stumble_until = -1.0        # "duck" mode: silent until this song time
         self._playing = False
         self._cache: dict = {}            # last loaded stems: {track.file: (backing, drums)}
+        self._load_lock = threading.Lock()
+        self._preloading: str | None = None
         self._ch_backing = self._ch_drums = None
         if audio_ok:
             try:
@@ -236,11 +241,32 @@ class AdaptiveAudio:
 
     def _load_stems(self, track):
         """>>> THE TWO STEM FILES ARE LOADED HERE <<< (decoded fully into memory, ~50 MB each)."""
-        if track.file not in self._cache:
-            backing_path, drums_path = stem_paths(track)
-            self._cache = {track.file: (pygame.mixer.Sound(str(backing_path)),     # melody / vocals / pads
-                                        pygame.mixer.Sound(str(drums_path)))}      # drums / beat
-        return self._cache[track.file]
+        with self._load_lock:                 # waits here if a background preload is still running
+            if track.file not in self._cache:
+                backing_path, drums_path = stem_paths(track)
+                self._cache = {track.file: (pygame.mixer.Sound(str(backing_path)),     # melody / vocals / pads
+                                            pygame.mixer.Sound(str(drums_path)))}      # drums / beat
+            return self._cache[track.file]
+
+    def preload(self, track, wanted: str) -> None:
+        """Decode the selected track's stems in a background thread while the player is
+        still in the menu, so pressing START does not freeze the game."""
+        if not self.ok or self._playing or self.resolve_mode(track, wanted) != "stems":
+            return
+        if track.file in self._cache or self._preloading == track.file:
+            return
+        self._preloading = track.file
+
+        def work():
+            try:
+                self._load_stems(track)
+            except (pygame.error, OSError) as e:
+                print(f"[audio] preload failed: {e}")
+            finally:
+                if self._preloading == track.file:
+                    self._preloading = None
+
+        threading.Thread(target=work, name="stem-preload", daemon=True).start()
 
     def stop(self, fade_ms: int = 0) -> None:
         if not self.ok or not self._playing:
@@ -488,6 +514,7 @@ def main() -> None:
             # Everything that makes sound runs here, right after the input was read, so
             # the delay between a pinch and its audio is not extended by rendering.
             if mode == "menu":
+                audio.preload(TRACKS[selected], music_mode)   # decode stems in the background
                 if menu_click is not None:
                     for i, rect in enumerate(renderer.track_rects[:len(TRACKS)]):
                         if rect.collidepoint(menu_click):
@@ -545,7 +572,7 @@ def main() -> None:
                 else:
                     renderer.draw_results(core, cur)
                 renderer.draw_effects(now)
-                renderer.draw_cursor(cur)
+                renderer.draw_cursor(cur, controller.gesture.close_thresh)
                 if not using_mouse and (show_meter or mode == "menu"):
                     renderer.draw_pinch_meter(cur, controller.gesture.close_thresh,
                                               controller.gesture.open_thresh)

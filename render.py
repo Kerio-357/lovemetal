@@ -55,15 +55,25 @@ def load_logo():
     return _logo_cache[0]
 
 
+_tint_cache: dict = {}
+
+
 def tinted_logo(size: int, color, alpha: int = 255):
-    """Logo scaled to size x size and recoloured (the artwork is white, so multiply)."""
+    """Logo scaled to size x size and recoloured (the artwork is white, so multiply).
+
+    Scaling + tinting is slow, so each (size, colour) is built once and reused;
+    only the overall alpha is changed per draw.
+    """
     logo = load_logo()
     if logo is None:
         return None
-    s = pygame.transform.smoothscale(logo, (int(size), int(size)))
-    s.fill((*color, 255), special_flags=pygame.BLEND_RGBA_MULT)
-    if alpha < 255:
-        s.set_alpha(int(alpha))
+    key = (int(size), tuple(color))
+    s = _tint_cache.get(key)
+    if s is None:
+        s = pygame.transform.smoothscale(logo, (int(size), int(size)))
+        s.fill((*color, 255), special_flags=pygame.BLEND_RGBA_MULT)
+        _tint_cache[key] = s
+    s.set_alpha(int(alpha))
     return s
 
 
@@ -104,6 +114,9 @@ def draw_heartagram(surface, center, radius, color, width=2):
                            int(heart_r), width)
 
 
+_panel_cache: dict = {}
+
+
 def draw_gothic_frame(surface, rect, border_color, fill_color=None, fill_alpha=255):
     """Ornate rectangular panel with blood-red corner flourishes."""
     rect = pygame.Rect(rect)
@@ -111,8 +124,12 @@ def draw_gothic_frame(surface, rect, border_color, fill_color=None, fill_alpha=2
         if fill_alpha >= 255:
             pygame.draw.rect(surface, fill_color, rect, border_radius=4)
         else:
-            panel = pygame.Surface(rect.size, pygame.SRCALPHA)
-            panel.fill((*fill_color, int(fill_alpha)))
+            key = (rect.size, tuple(fill_color), int(fill_alpha))
+            panel = _panel_cache.get(key)
+            if panel is None:                       # build each translucent panel once
+                panel = pygame.Surface(rect.size, pygame.SRCALPHA)
+                panel.fill((*fill_color, int(fill_alpha)))
+                _panel_cache[key] = panel
             surface.blit(panel, rect.topleft)
     pygame.draw.rect(surface, border_color, rect, width=2, border_radius=4)
     c = 12
@@ -145,8 +162,9 @@ class Renderer:
 
         # Backgrounds
         self.bg_plain = self._make_plain_background()
-        self.vignette = self._make_vignette()
         self.bg_cam = pygame.Surface((w, h)).convert()
+        self._text_cache: dict = {}          # rendered text surfaces (font.render is slow)
+        self._circle_cache: dict = {}        # translucent circle sprites
         self._bg_frame_id = None
         self._have_cam = False
 
@@ -167,17 +185,6 @@ class Renderer:
             pygame.draw.line(bg, _lerp_color(COLOR_BG, (38, 8, 14), y / h), (0, y), (w, y))
         draw_logo(bg, (w // 2, h // 2 + 10), 560, (34, 10, 15))
         return bg
-
-    def _make_vignette(self) -> pygame.Surface:
-        """Dark corners so HUD and notes stay readable on top of the webcam picture."""
-        w, h = self.cfg.screen_w, self.cfg.screen_h
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-        d = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
-        alpha = np.clip((d - 0.45) / 0.75, 0, 1) ** 1.5 * self.cfg.bg_vignette
-        rgba = np.zeros((h, w, 4), np.uint8)
-        rgba[..., 0], rgba[..., 1], rgba[..., 2] = COLOR_BG
-        rgba[..., 3] = alpha.astype(np.uint8)
-        return pygame.image.frombuffer(rgba.tobytes(), (w, h), "RGBA").convert_alpha()
 
     def _make_note_sprite(self) -> pygame.Surface:
         r = self.cfg.note_radius
@@ -202,16 +209,18 @@ class Renderer:
 
     # -- background ------------------------------------------------------
     def begin(self, state: HandState, use_camera: bool = True) -> None:
-        """Full-screen webcam picture (already tinted by the tracker) or the plain backdrop."""
+        """Full-screen webcam picture (tinted + vignetted by the tracker) or the plain backdrop."""
         frame = state.frame if use_camera else None
         if frame is not None:
-            if state.frame_id != self._bg_frame_id:          # convert only new camera frames
+            if state.frame_id != self._bg_frame_id:          # convert only NEW camera frames
                 self._bg_frame_id = state.frame_id
                 h, w = frame.shape[:2]
                 try:
                     cam = pygame.image.frombuffer(frame.tobytes(), (w, h), "RGB")
-                    self.bg_cam.blit(cam, (0, 0))
-                    self.bg_cam.blit(self.vignette, (0, 0))
+                    if (w, h) == self.bg_cam.get_size():
+                        self.bg_cam.blit(cam, (0, 0))
+                    else:                                    # one stretch, straight into bg_cam
+                        pygame.transform.scale(cam.convert(self.bg_cam), self.bg_cam.get_size(), self.bg_cam)
                     self._have_cam = True
                 except (ValueError, pygame.error):
                     self._have_cam = False
@@ -222,21 +231,38 @@ class Renderer:
     # -- helpers ---------------------------------------------------------
     def _alpha_circle(self, color, radius, alpha, pos, width=0) -> None:
         r = max(1, int(radius))
-        s = pygame.Surface((2 * r + 4, 2 * r + 4), pygame.SRCALPHA)
-        pygame.draw.circle(s, (*color, int(max(0, min(255, alpha)))), (r + 2, r + 2), r, width)
-        self.screen.blit(s, (int(pos[0]) - r - 2, int(pos[1]) - r - 2))
+        key = (r, tuple(color), width)
+        spr = self._circle_cache.get(key)
+        if spr is None:
+            if len(self._circle_cache) > 600:
+                self._circle_cache.clear()
+            spr = pygame.Surface((2 * r + 4, 2 * r + 4), pygame.SRCALPHA)
+            pygame.draw.circle(spr, (*color, 255), (r + 2, r + 2), r, width)
+            self._circle_cache[key] = spr
+        spr.set_alpha(int(max(0, min(255, alpha))))
+        self.screen.blit(spr, (int(pos[0]) - r - 2, int(pos[1]) - r - 2))
+
+    def _render(self, txt, font, color) -> pygame.Surface:
+        """font.render with a cache: most HUD/menu texts are identical frame after frame."""
+        key = (id(font), txt, tuple(color))
+        surf = self._text_cache.get(key)
+        if surf is None:
+            if len(self._text_cache) > 400:
+                self._text_cache.clear()
+            surf = font.render(txt, True, color)
+            self._text_cache[key] = surf
+        return surf
 
     def _text(self, txt, font, color, pos, alpha=255, center=False, shadow=True) -> pygame.Rect:
         """Draw text (with a drop shadow so it stays readable over the webcam picture)."""
-        surf = font.render(txt, True, color)
+        surf = self._render(txt, font, color)
         rect = surf.get_rect(center=pos) if center else surf.get_rect(topleft=pos)
+        a = int(max(0, min(255, alpha)))
         if shadow:
-            sh = font.render(txt, True, (0, 0, 0))
-            if alpha < 255:
-                sh.set_alpha(int(alpha))
+            sh = self._render(txt, font, (0, 0, 0))
+            sh.set_alpha(a)
             self.screen.blit(sh, (rect.x + 2, rect.y + 2))
-        if alpha < 255:
-            surf.set_alpha(int(alpha))
+        surf.set_alpha(a)
         self.screen.blit(surf, rect)
         return rect
 
@@ -278,7 +304,7 @@ class Renderer:
             self._text(track.title, self.font_header if sel else self.font_body,
                        COLOR_WHITE if sel or hov else COLOR_SILVER,
                        (rect.x + 48, rect.centery - (16 if sel else 12)), shadow=False)
-            bpm = self.font_small.render(f"{track.bpm:.0f} BPM", True, COLOR_SILVER)
+            bpm = self._render(f"{track.bpm:.0f} BPM", self.font_small, COLOR_SILVER)
             scr.blit(bpm, (rect.right - bpm.get_width() - 18, rect.centery - 9))
 
         self._button(self.btn_start, "START RITE", self._hover(self.btn_start, cur))
@@ -312,7 +338,9 @@ class Renderer:
                 self._alpha_circle(col, ring_r, 120 * fade, (n.x, n.y), 3)
 
     # -- cursor ----------------------------------------------------------
-    def draw_cursor(self, cur: CursorState) -> None:
+    def draw_cursor(self, cur: CursorState, close_thresh: float | None = None) -> None:
+        """Meta-Quest-style pointer: a dot with a ring that closes in as the fingers
+        approach each other, and snaps shut (filled, blood red) at the moment of the pinch."""
         if not cur.visible:
             self.trail.clear()
             return
@@ -325,15 +353,20 @@ class Renderer:
         self.trail.append(cur.pos)
         for i, p in enumerate(self.trail):
             k = (i + 1) / len(self.trail)
-            self._alpha_circle(COLOR_BLOOD, c.cursor_radius * k * 0.7, 110 * k, p)
-        r = c.cursor_radius
+            self._alpha_circle(COLOR_BLOOD, c.cursor_radius * k * 0.6, 100 * k, p)
+        # Pinch strength: 0 = fingers open, 1 = fingertips at the click threshold.
+        close = c.pinch_close_thresh if close_thresh is None else close_thresh
+        strength = _clamp01((1.0 - cur.pinch_ratio) / max(1.0 - close, 1e-6))
+        dot = 6
         if cur.pinched:
-            pygame.draw.circle(self.screen, COLOR_BLOOD, (x, y), r)
-            pygame.draw.circle(self.screen, COLOR_WHITE, (x, y), r, 3)
+            pygame.draw.circle(self.screen, COLOR_BLOOD, (x, y), dot + 4)
+            pygame.draw.circle(self.screen, COLOR_WHITE, (x, y), dot + 4, 2)
         else:
-            pygame.draw.circle(self.screen, (0, 0, 0), (x, y), r + 2, 5)
-            pygame.draw.circle(self.screen, COLOR_WHITE, (x, y), r, 3)
-            pygame.draw.circle(self.screen, COLOR_BLOOD, (x, y), 5)
+            ring = int(dot + 4 + (c.cursor_radius + 8 - dot - 4) * (1.0 - strength))
+            pygame.draw.circle(self.screen, (0, 0, 0), (x, y), ring + 1, 4)
+            pygame.draw.circle(self.screen, COLOR_WHITE, (x, y), ring, 2)
+            pygame.draw.circle(self.screen, COLOR_WHITE, (x, y), dot)
+            pygame.draw.circle(self.screen, COLOR_BLOOD, (x, y), dot - 2)
 
     # -- effects ---------------------------------------------------------
     def add_popup(self, text: str, x: float, y: float, color, now: float) -> None:
@@ -461,7 +494,7 @@ class Renderer:
         for i, (label, value) in enumerate(rows):
             y = 225 + i * 58
             self._text(label, self.font_body, COLOR_SILVER, (panel.x + 70, y + 6), shadow=False)
-            val = self.font_header.render(value, True, COLOR_WHITE)
+            val = self._render(value, self.font_header, COLOR_WHITE)
             self.screen.blit(val, (panel.right - 70 - val.get_width(), y))
         self._button(self.btn_return, "RETURN", self._hover(self.btn_return, cur))
 
@@ -494,5 +527,5 @@ class Renderer:
             txt += f" | tracking {track_fps:.0f}/s | model {infer_ms:.0f} ms"
         if skipping:
             txt += " | frame skip"
-        s = self.font_small.render(txt, True, (150, 150, 160))
+        s = self._render(txt, self.font_small, (150, 150, 160))
         self.screen.blit(s, (self.cfg.screen_w - s.get_width() - 14, self.cfg.screen_h - 26))

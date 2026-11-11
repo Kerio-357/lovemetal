@@ -63,6 +63,9 @@ class Config:
     # gray * multiplier. Lower numbers = darker; raise the first for a redder look.
     bg_tint: tuple = (0.50, 0.10, 0.14)      # (R, G, B) multipliers
     bg_vignette: int = 150             # 0..255 darkness of the screen corners
+    # PERFORMANCE: the background is prepared at screen size / bg_downscale and stretched
+    # by pygame. 2 loses nothing with a 640x480 camera and is ~4x cheaper than 1.
+    bg_downscale: int = 2
     draw_hand_skeleton: bool = True    # draw the detected keypoints on the background
 
     # --- YOLOv8-pose model (best.pt) ------------------------------------
@@ -75,9 +78,16 @@ class Config:
     yolo_conf: float = 0.35            # min hand-box confidence
     yolo_device: str | None = None     # None = auto (CUDA if available), or "cpu", "cuda:0", "mps"
     kpt_conf: float = 0.30             # min confidence of the keypoints we rely on
-    # Cursor anchor: "pinch_mid" (midpoint of thumb+index tips, stable while pinching)
-    # or "index_tip".
-    cursor_anchor: str = "pinch_mid"
+    # Which point of the hand drives the cursor:
+    #   "knuckles"  - between the index and middle knuckles. Like the Meta Quest pointer it
+    #                 belongs to the hand, not the fingertips, so it stays perfectly still
+    #                 while the fingers pinch.
+    #   "pinch_mid" - midpoint of thumb tip and index tip (moves a little during a pinch).
+    #   "index_tip" - the index fingertip (moves most during a pinch).
+    cursor_anchor: str = "knuckles"
+    # CPU threads for the model. None = all but one core, so the game loop and the audio
+    # always have a free core (this removes most stutter on laptops without a GPU).
+    yolo_threads: int | None = None
 
     # --- Smoothing -------------------------------------------------------
     smoother: str = "kalman"           # "ema" or "kalman"
@@ -92,7 +102,10 @@ class Config:
     cursor_predict_s: float = 0.08        # max look-ahead in seconds (0 = off)
     cursor_predict_min_speed: float = 250.0   # px/s; below this the look-ahead fades out (no jitter at rest)
 
-    # --- PINCH GESTURE = the only way to hit a note ---------------------------
+    # --- PINCH "CLICK" (Meta Quest style) = the only way to hit a note --------
+    # Aim with the hand, then tap thumb and index fingertip together and let go.
+    # The click fires the moment the fingertips meet; they must open again before the
+    # next click. The cursor ring closes as the fingers approach (pinch strength).
     # Measured from the YOLO keypoints every camera frame:
     #     pinch_ratio = distance(thumb tip, index tip) / distance(wrist, middle knuckle)
     # Dividing by the palm size makes it independent of how far the hand is from the

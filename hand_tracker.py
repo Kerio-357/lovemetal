@@ -17,6 +17,7 @@ Each HandState also carries the webcam picture scaled to cover the whole screen
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -28,9 +29,9 @@ import numpy as np
 from config import Config
 
 # Keypoint indices (Ultralytics hand-keypoints / MediaPipe order)
-WRIST, THUMB_TIP, INDEX_TIP, MIDDLE_MCP = 0, 4, 8, 9
+WRIST, THUMB_TIP, INDEX_MCP, INDEX_TIP, MIDDLE_MCP = 0, 4, 5, 8, 9
 NUM_KPTS = 21
-REQUIRED_KPTS = (WRIST, THUMB_TIP, INDEX_TIP, MIDDLE_MCP)
+REQUIRED_KPTS = (WRIST, THUMB_TIP, INDEX_MCP, INDEX_TIP, MIDDLE_MCP)
 
 # Skeleton edges for the on-screen hand overlay (pairs of keypoint indices)
 HAND_EDGES = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10),
@@ -74,6 +75,7 @@ class HandTracker:
         self._frame_cond = threading.Condition()
         self._latest: tuple | None = None      # (frame_bgr, capture_time, sequence_number)
         self._cam_lost = False
+        self._vig: np.ndarray | None = None    # cached vignette for the background
         self._init_error: Exception | None = None
 
     # -- lifecycle -------------------------------------------------------
@@ -121,7 +123,16 @@ class HandTracker:
         cfg = self.cfg
         if self._cap is not None:
             self._cap.release()
-        cap = cv2.VideoCapture(cfg.camera_index)
+        cap = None
+        if sys.platform == "win32":
+            # DirectShow opens faster and buffers fewer frames (less lag) than the default
+            # Windows backend; fall back to the default if it cannot open the camera.
+            cap = cv2.VideoCapture(cfg.camera_index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release()
+                cap = None
+        if cap is None:
+            cap = cv2.VideoCapture(cfg.camera_index)
         if not cap.isOpened():
             cap.release()
             raise RuntimeError(f"Cannot open camera index {cfg.camera_index} "
@@ -138,6 +149,7 @@ class HandTracker:
         except ImportError as e:
             raise ImportError("ultralytics is not installed. Run: pip install ultralytics") from e
 
+        self._limit_threads()
         model = YOLO(str(weights))
         if getattr(model, "task", None) != "pose":
             raise ValueError(f"{weights.name} is a '{model.task}' model, expected a 'pose' model")
@@ -147,6 +159,15 @@ class HandTracker:
         # Warm-up: the first predict() builds the predictor and is slow; do it now.
         self._predict(model, np.zeros((self.cfg.cam_h, self.cfg.cam_w, 3), np.uint8))
         return model
+
+    def _limit_threads(self) -> None:
+        """Leave one CPU core to the game loop / audio so inference cannot starve them."""
+        try:
+            import torch
+            n = self.cfg.yolo_threads or max(1, torch.get_num_threads() - 1)
+            torch.set_num_threads(int(n))
+        except Exception:  # noqa: BLE001 - purely an optimisation
+            pass
 
     def _predict(self, model, frame_bgr: np.ndarray):
         c = self.cfg
@@ -194,20 +215,40 @@ class HandTracker:
             y = (y / c.screen_h - c.active_margin_y) / (1 - 2 * c.active_margin_y) * c.screen_h
         return min(max(x, 0.0), c.screen_w - 1.0), min(max(y, 0.0), c.screen_h - 1.0)
 
+    def _bg_size(self) -> tuple[int, int]:
+        d = max(1, int(self.cfg.bg_downscale))
+        return self.cfg.screen_w // d, self.cfg.screen_h // d
+
+    def _vignette_gain(self, bw: int, bh: int) -> np.ndarray:
+        """Per-pixel brightness factor (1 in the centre, darker towards the corners)."""
+        if self._vig is None or self._vig.shape != (bh, bw):
+            yy, xx = np.mgrid[0:bh, 0:bw].astype(np.float32)
+            d = np.sqrt(((xx - bw / 2) / (bw / 2)) ** 2 + ((yy - bh / 2) / (bh / 2)) ** 2)
+            dark = np.clip((d - 0.45) / 0.75, 0, 1) ** 1.5 * (self.cfg.bg_vignette / 255.0)
+            self._vig = (1.0 - dark).astype(np.float32)
+        return self._vig
+
     def _background(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """Camera frame -> screen-sized, mirrored, red-tinted RGB picture."""
+        """Camera frame -> mirrored, red-tinted, vignetted RGB picture.
+
+        Produced at (screen / bg_downscale) and stretched to the screen by the renderer:
+        all per-pixel work happens on a quarter of the pixels.
+        """
         c = self.cfg
         h, w = frame_bgr.shape[:2]
-        scale, ox, oy = self.cover_transform(w, h)
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (max(c.screen_w, round(w * scale)), max(c.screen_h, round(h * scale))),
-                          interpolation=cv2.INTER_LINEAR)
-        ox, oy = int(ox), int(oy)
-        gray = gray[oy:oy + c.screen_h, ox:ox + c.screen_w]
+        bw, bh = self._bg_size()
+        scale, ox, oy = self.cover_transform(w, h)          # camera px -> screen px
+        # Crop the part of the camera frame that is visible on screen, then resize once.
+        x0, y0 = int(round(ox / scale)), int(round(oy / scale))
+        cw, ch = int(round(c.screen_w / scale)), int(round(c.screen_h / scale))
+        gray = cv2.cvtColor(frame_bgr[y0:y0 + ch, x0:x0 + cw], cv2.COLOR_BGR2GRAY)
+        if gray.shape != (bh, bw):
+            gray = cv2.resize(gray, (bw, bh), interpolation=cv2.INTER_LINEAR)
         if c.mirror:
             gray = cv2.flip(gray, 1)
+        lit = gray.astype(np.float32) * self._vignette_gain(bw, bh)
         # Gothic filter: grayscale picture pushed into dark red.
-        return cv2.merge([cv2.convertScaleAbs(gray, alpha=float(m)) for m in c.bg_tint])
+        return cv2.merge([cv2.convertScaleAbs(lit, alpha=float(m)) for m in c.bg_tint])
 
     @staticmethod
     def pinch_ratio(kpts: np.ndarray, w: int, h: int) -> float:
@@ -217,10 +258,14 @@ class HandTracker:
         return float(np.linalg.norm(px[THUMB_TIP] - px[INDEX_TIP]) / palm)
 
     def _cursor_point(self, kpts: np.ndarray) -> tuple[float, float]:
-        if self.cfg.cursor_anchor == "index_tip":
-            return float(kpts[INDEX_TIP][0]), float(kpts[INDEX_TIP][1])
-        mid = (kpts[THUMB_TIP] + kpts[INDEX_TIP]) / 2   # barely moves while pinching
-        return float(mid[0]), float(mid[1])
+        anchor = self.cfg.cursor_anchor
+        if anchor == "index_tip":
+            p = kpts[INDEX_TIP]
+        elif anchor == "pinch_mid":
+            p = (kpts[THUMB_TIP] + kpts[INDEX_TIP]) / 2
+        else:   # "knuckles": Quest-style pointer on the hand itself - does not move when pinching
+            p = (kpts[INDEX_MCP] + kpts[MIDDLE_MCP]) / 2
+        return float(p[0]), float(p[1])
 
     # -- worker ----------------------------------------------------------
     def _publish(self, state: HandState) -> None:
@@ -328,13 +373,14 @@ class HandTracker:
             self._publish(state)
 
     def _draw_skeleton(self, bg: np.ndarray, kpts: np.ndarray, w: int, h: int, ratio: float) -> None:
-        """Draw the 21 detected keypoints on the full-screen picture (already mirrored coords)."""
+        """Draw the 21 detected keypoints on the background picture (already mirrored coords)."""
         scale, ox, oy = self.cover_transform(w, h)
-        pts = [(int(x * w * scale - ox), int(y * h * scale - oy)) for x, y in kpts]
+        k = bg.shape[1] / self.cfg.screen_w                 # screen px -> background px
+        pts = [(int((x * w * scale - ox) * k), int((y * h * scale - oy) * k)) for x, y in kpts]
         for a, b in HAND_EDGES:
-            cv2.line(bg, pts[a], pts[b], (150, 150, 160), 2, cv2.LINE_AA)
+            cv2.line(bg, pts[a], pts[b], (150, 150, 160), 1, cv2.LINE_AA)
         for p in pts:
-            cv2.circle(bg, p, 4, (225, 225, 235), -1, cv2.LINE_AA)
+            cv2.circle(bg, p, 2, (225, 225, 235), -1, cv2.LINE_AA)
         pinched = ratio < self.cfg.pinch_close_thresh
         cv2.line(bg, pts[THUMB_TIP], pts[INDEX_TIP], (255, 255, 255) if pinched else (230, 0, 38),
-                 3, cv2.LINE_AA)
+                 2, cv2.LINE_AA)

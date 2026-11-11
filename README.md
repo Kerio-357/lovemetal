@@ -18,7 +18,10 @@ Without them the game still runs, silently.
 Audio files live in `songs/`. Each track's file name, BPM and beat offset are in `TRACKS`
 in `config.py`; notes are placed on that beat grid. Files are loaded in `start_music()` in `main.py`.
 
-## Pinch input
+## Pinch input (Meta Quest style)
+The cursor is anchored to the knuckles (`cursor_anchor = "knuckles"`), so it stays still while the fingers move; the ring around it
+closes as thumb and index approach and snaps shut on the click. `--anchor pinch_mid` or `index_tip` restores fingertip aiming.
+
 A note is hit only by a **pinch** (thumb tip + index tip together): cursor inside the note + pinch + inside the beat window.
 Hovering does nothing, and a held pinch does not repeat. The gesture is measured as
 `pinch_ratio = fingertip distance / palm size`; it fires when the ratio drops below `pinch_close_thresh` (0.28) and re-arms above
@@ -29,6 +32,8 @@ Hovering does nothing, and a held pinch does not repeat. The gesture is measured
 - A grabber thread keeps only the newest camera frame, so a slow model skips frames instead of lagging behind.
 - The cursor is extrapolated between camera frames (`cursor_predict_s`) and drawn at 60 fps (`clock.tick(60)`).
 - If drawing is too slow, every second frame is skipped while input and audio still run every loop (`frame_skip`, `--no-frame-skip`).
+- The background is built at half resolution and stretched (`bg_downscale`); texts, panels and logos are cached instead of re-rendered.
+- The model leaves one CPU core free for the game loop (`yolo_threads`); stems are decoded in the background while you are in the menu.
 - The HUD shows render fps, tracking rate and model time.
 
 ## Adaptive audio (the music reacts to your playing)

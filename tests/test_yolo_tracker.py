@@ -48,6 +48,7 @@ def hand(pinched, cx=0.4, cy=0.5):
     k = np.zeros((21, 2), np.float32)
     k[0] = (cx, cy + 0.25)            # wrist
     k[9] = (cx, cy)                   # middle mcp  -> palm = 0.25*480 = 120 px
+    k[5] = (cx, cy)                   # index mcp (cursor anchor = knuckles)
     gap = 0.01 if pinched else 0.15   # thumb-index gap (fraction of width)
     k[4] = (cx - gap / 2, cy - 0.1)
     k[8] = (cx + gap / 2, cy - 0.1)
@@ -103,7 +104,7 @@ def test_end_to_end_cursor_click_and_mirror():
         s = tr.get_state()
         # hand at x=0.2 in the raw frame -> mirrored to 0.8 -> right side of the screen
         assert s.cursor_xy[0] > CFG.screen_w * 0.6, s.cursor_xy
-        assert s.frame is not None and s.frame.shape == (CFG.screen_h, CFG.screen_w, 3)
+        assert s.frame is not None and s.frame.shape == (CFG.screen_h // 2, CFG.screen_w // 2, 3)
         assert s.infer_ms >= 0
         ctrl = CursorController(CFG)
         # open -> pinch -> must yield exactly one click through the whole pipeline

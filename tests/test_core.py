@@ -100,10 +100,28 @@ def test_background_frame():
     import numpy as np
     t = HandTracker(CFG)
     cam = np.zeros((480, 640, 3), np.uint8); cam[:, :320] = 200       # left half bright
-    bg = t._background(cam)
-    assert bg.shape == (720, 1280, 3) and bg.dtype == np.uint8 and bg.flags["C_CONTIGUOUS"]
-    assert bg[360, 1000, 0] > bg[360, 200, 0]                        # mirrored: bright on the right
-    assert bg[360, 1000, 0] > bg[360, 1000, 1]                       # red tint
+    bg = t._background(cam)                                          # half-size picture, stretched later
+    assert bg.shape == (360, 640, 3) and bg.dtype == np.uint8 and bg.flags["C_CONTIGUOUS"]
+    assert bg[180, 500, 0] > bg[180, 100, 0]                         # mirrored: bright on the right
+    assert bg[180, 500, 0] > bg[180, 500, 1]                         # red tint
+    assert bg[180, 400, 0] > bg[10, 630, 0] + 20                     # vignette: corners darker
+    full = HandTracker(dataclasses.replace(CFG, bg_downscale=1))._background(cam)
+    assert full.shape == (720, 1280, 3)
+    wide = np.zeros((720, 1280, 3), np.uint8)                        # 16:9 camera: no crop needed
+    assert t._background(wide).shape == (360, 640, 3)
+
+
+def test_knuckle_anchor_is_still_during_pinch():
+    import numpy as np
+    k_open = np.zeros((21, 2), np.float32); k_open[5] = (0.40, 0.50); k_open[9] = (0.46, 0.50)
+    k_open[4] = (0.30, 0.40); k_open[8] = (0.42, 0.30)
+    k_pinch = k_open.copy(); k_pinch[4] = (0.37, 0.36); k_pinch[8] = (0.38, 0.36)   # fingertips meet
+    quest = HandTracker(CFG)
+    assert CFG.cursor_anchor == "knuckles"
+    assert quest._cursor_point(k_open) == quest._cursor_point(k_pinch)               # pointer does not move
+    assert np.allclose(quest._cursor_point(k_open), (0.43, 0.50), atol=1e-6)
+    tips = HandTracker(dataclasses.replace(CFG, cursor_anchor="pinch_mid"))
+    assert tips._cursor_point(k_open) != tips._cursor_point(k_pinch)
 
 
 TRACK = TRACKS[0]

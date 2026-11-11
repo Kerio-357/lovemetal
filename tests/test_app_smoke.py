@@ -223,6 +223,21 @@ def test_duck_fallback_engine():
         assert eng.start(track, "off") is None and eng.mode == "off" and mv.set_volume.call_args[0][0] == 1.0
 
 
+def test_stems_preload_in_background():
+    import tempfile, config
+    with tempfile.TemporaryDirectory() as d:
+        track = config.TRACKS[0]
+        for suffix in ("_backing.ogg", "_drums.ogg"): (Path(d) / (Path(track.file).stem + suffix)).write_bytes(b"x")
+        pg, main, eng, ch = make_engine(Path(d))
+        eng.preload(track, "auto"); eng.preload(track, "auto")            # second call is a no-op
+        t0 = time.time()
+        while track.file not in eng._cache and time.time() - t0 < 2: time.sleep(0.01)
+        assert track.file in eng._cache and pg.mixer.Sound.call_count == 2
+        assert eng.start(track, "auto") is None and pg.mixer.Sound.call_count == 2   # START reuses it
+        eng.preload(config.TRACKS[1], "auto")                             # no stems -> nothing to do
+        assert pg.mixer.Sound.call_count == 2
+
+
 def test_window_icon_is_set():
     fake_pygame.icons.clear()
     run(lambda pg, mouse, main: [[]] * 3, ["--mouse"])
@@ -237,7 +252,7 @@ def test_camera_background_and_escape():
         import mouse_input
         orig = mouse_input.MouseTracker.get_state
         def gs(self):
-            s = orig(self); s.frame = np.full((720, 1280, 3), 60, np.uint8); return s
+            s = orig(self); s.frame = np.full((360, 640, 3), 60, np.uint8); return s
         mouse_input.MouseTracker.get_state = gs
     run(build, ["--mouse", "--full-song", "--approach", "2.0"], patch)
 

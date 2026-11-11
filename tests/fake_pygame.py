@@ -21,8 +21,9 @@ class Rect:
 
 class Surface:
     def __init__(self, size=(10, 10), flags=0): self.size = tuple(int(v) for v in size)
-    def convert(self): return self
-    convert_alpha = convert
+    def convert(self, other=None): return self
+    def convert_alpha(self): return self
+    def get_size(self): return self.size
     def fill(self, c, rect=None, special_flags=0): assert len(c) in (3, 4)
     def blit(self, src, dest): assert isinstance(src, Surface), src; float(dest[0]); float(dest[1])
     def set_alpha(self, a): assert 0 <= int(a) <= 255, a
@@ -70,7 +71,7 @@ def install(events_script, mouse_state):
     def load(path):
         assert Path(path).is_file(), path; return Surface((512, 512))
     pg.image = types.SimpleNamespace(frombuffer=frombuffer, load=load)
-    pg.transform = types.SimpleNamespace(smoothscale=lambda s, size: Surface(size))
+    pg.transform = types.SimpleNamespace(smoothscale=lambda s, size: Surface(size), scale=lambda s, size, dest=None: dest or Surface(size))
     it = iter(events_script)
     pg.event = types.SimpleNamespace(get=lambda: next(it, [types.SimpleNamespace(type=pg.QUIT)]))
     pg.mouse = types.SimpleNamespace(get_pos=lambda: mouse_state["pos"],
