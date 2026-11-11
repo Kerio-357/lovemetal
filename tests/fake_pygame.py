@@ -52,7 +52,7 @@ def install(events_script, mouse_state):
     pg.Rect, pg.Surface, pg.error = Rect, Surface, type("error", (Exception,), {})
     pg.SRCALPHA, pg.FULLSCREEN, pg.SCALED, pg.BLEND_RGBA_MULT = 1, 2, 4, 8
     pg.QUIT, pg.KEYDOWN, pg.MOUSEBUTTONDOWN = 100, 101, 102
-    for i, k in enumerate("ESCAPE c SPACE UP DOWN w s TAB LEFT RIGHT RETURN KP_ENTER p".split()):
+    for i, k in enumerate("ESCAPE c SPACE UP DOWN w s TAB LEFT RIGHT RETURN KP_ENTER p h".split()):
         setattr(pg, "K_" + k, 200 + i)
     pg.init = lambda: None; pg.quit = lambda: None
     pg.display = types.SimpleNamespace(set_mode=lambda s, f=0: Surface(s), set_caption=lambda t: None, set_icon=lambda s: icons.append(s),

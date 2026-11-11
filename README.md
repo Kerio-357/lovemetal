@@ -17,6 +17,11 @@ The mp3 files are **not** in this repository (copyrighted). Put your own files i
 Audio files live in `songs/`. Each track's file name, BPM and beat offset are in `TRACKS`
 in `config.py`; notes are placed on that beat grid. Files are loaded in `start_music()` in `main.py`.
 
+## Hit feedback
+Every judged note goes through `on_judgement()` in `main.py`, which calls `play_hit_sound()`, `spawn_hit_particles(x, y)` and
+`show_score_popup(text, x, y)`. The hit sound is `assets/hit.wav` (replace the file to change it). Hit rule: `HIT: PINCH`
+(pinch on the target) or `HIT: TOUCH` (just move the hand onto it) - menu button, `H` key or `--hit-mode touch`.
+
 ## Logo / icon
 `assets/heartagram.png` (white on transparent) is the window icon, the menu crest, the face of every target and the
 backdrop when the camera is off. Swap the file to change it; if it is missing the game falls back to a drawn star.
@@ -26,7 +31,9 @@ backdrop when the camera is off. Swap the file to change it; if it is missing th
 |---|---|
 | `PACES`, `default_pace` | beats between notes (SLOW 4, NORMAL 2, FAST 1) |
 | `approach_time` | how long a note is visible before its beat |
-| `window_300/100/50` | timing tolerance |
+| `window_300/100/50` | timing tolerance for PERFECT / GREAT / GOOD |
+| `hit_mode`, `touch_window` | pinch or touch to hit; how early a touch counts |
+| `hit_volume`, `popup_time`, `particle_count` | hit feedback |
 | `note_radius`, `hit_forgiveness` | target size and hit radius |
 | `audio_offset_s` | shift notes against the music if they feel early/late |
 | `max_song_seconds` | length of a round (`None` = whole song) |

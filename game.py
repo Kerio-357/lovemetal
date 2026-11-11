@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from config import Config, Track
 
 MISS, MEH, OK, GREAT = 0, 50, 100, 300
-LABELS = {MISS: "MISS", MEH: "50", OK: "100", GREAT: "300"}
+LABELS = {MISS: "MISS!", MEH: "GOOD!", OK: "GREAT!", GREAT: "PERFECT!"}   # judgement pop-ups
 
 
 @dataclass
@@ -34,7 +34,15 @@ class HitEvent:
 
 
 def note_times(cfg: Config, track: Track, beats_per_note: int) -> list[float]:
-    """Song times of all notes: every `beats_per_note`-th beat of the track's grid."""
+    """RHYTHM GENERATOR: song times (seconds) at which notes must be hit.
+
+    Default: every `beats_per_note`-th beat of the track's grid,
+        t_k = offset + k * (60 / bpm) * beats_per_note
+    If the track defines explicit `timestamps`, those are used instead.
+    """
+    if track.timestamps:
+        limit = min(track.duration, cfg.max_song_seconds or track.duration)
+        return [t + cfg.audio_offset_s for t in sorted(track.timestamps) if t <= limit]
     interval = 60.0 / track.bpm * beats_per_note
     anchor = track.offset + cfg.audio_offset_s
     start = max(cfg.lead_in_s, track.lead_in, cfg.approach_time + 0.5)
@@ -137,15 +145,26 @@ class GameCore:
             out.append(n)
         return out
 
-    def click(self, pos: tuple[float, float], now: float) -> HitEvent | None:
-        """Judge a click. Only the *earliest* pending note can be hit (osu! note lock)."""
+    def touch(self, pos: tuple[float, float], now: float) -> HitEvent | None:
+        """Touch mode: the hand being on the target inside its window counts as a hit."""
+        return self.click(pos, now, early_limit=self.cfg.touch_window)
+
+    def click(self, pos: tuple[float, float], now: float,
+              early_limit: float | None = None) -> HitEvent | None:
+        """Judge a hit attempt at `pos`, made at time `now`.
+
+        A hit registers only inside the note's ACTIVE RHYTHM WINDOW
+        (hit_time - early_limit .. hit_time + window_50) and only on the *earliest*
+        pending note (osu! note lock). Outside the window, or beside the note, nothing
+        happens; a note whose window passes untouched becomes a MISS in update().
+        """
         c = self.cfg
         if self._next >= len(self.notes):
             return None
         target = self.notes[self._next]
         dt = self.song_time(now) - target.hit_time
-        if dt < -c.window_50:                       # too early: not hittable yet, ignore
-            return None
+        if dt < -(c.window_50 if early_limit is None else early_limit):
+            return None                             # too early: window not open yet
         if math.hypot(pos[0] - target.x, pos[1] - target.y) > c.note_radius * c.hit_forgiveness:
             return None                             # clicked beside the note: no penalty
         adt = abs(dt)

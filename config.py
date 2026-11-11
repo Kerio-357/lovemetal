@@ -13,6 +13,9 @@ class Track:
     offset: float          # seconds from the start of the file to a beat (grid anchor)
     duration: float        # length of the audio file in seconds
     lead_in: float = 0.0   # no notes before this time (e.g. a long quiet intro)
+    # Optional hand-made beatmap: exact note times in seconds, e.g. (4.2, 5.25, 6.3).
+    # Empty = notes are generated from bpm + offset (the default for all three songs).
+    timestamps: tuple = ()
 
 
 # >>> AUDIO: put the audio files into  osu_cv_project/songs/  with exactly these names.
@@ -92,6 +95,15 @@ class Config:
     window_300: float = 0.12
     window_100: float = 0.22
     window_50: float = 0.35
+
+    # --- Hit rule and hit feedback -----------------------------------------
+    # "pinch": the cursor must be on the target AND you pinch (click) inside its window.
+    # "touch": moving the hand onto the target inside its window is enough (easier).
+    hit_mode: str = "pinch"
+    touch_window: float = 0.22         # touch mode: a note becomes touchable this long before its beat
+    hit_volume: float = 0.7            # loudness of assets/hit.wav (0..1)
+    popup_time: float = 0.5            # seconds the PERFECT! / GREAT! / MISS! text stays
+    particle_count: int = 26           # sparks per hit
 
     # --- Targets ---------------------------------------------------------
     note_radius: int = 64

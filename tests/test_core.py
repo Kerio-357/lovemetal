@@ -109,6 +109,37 @@ def test_game_judgement_and_scoring():
     assert g.max_combo == 2 and 0 < g.accuracy < 100 and not g.finished
 
 
+def test_timing_window_and_touch_mode():
+    cfg = dataclasses.replace(CFG, rng_seed=2)
+    g = GameCore(cfg); g.start(0.0, TRACK, 2)
+    n = g.notes[0]
+    assert g.click((n.x, n.y), n.hit_time - cfg.window_50 - 0.01) is None     # before the window
+    assert g.touch((n.x, n.y), n.hit_time - cfg.touch_window - 0.01) is None  # touch opens later
+    assert g.touch((n.x + 400, n.y), n.hit_time) is None                      # not on the target
+    assert n.state == "pending"
+    assert g.touch((n.x, n.y), n.hit_time + 0.02).points == GREAT             # on the beat -> PERFECT!
+    n = g.notes[1]
+    assert g.touch((n.x, n.y), n.hit_time - cfg.touch_window + 0.001).points == OK   # hand waiting early
+    n = g.notes[2]
+    assert g.click((n.x, n.y), n.hit_time + cfg.window_50 - 0.01).points == MEH      # late edge
+    n = g.notes[3]
+    assert [e.points for e in g.update(n.hit_time + cfg.window_50 + 0.01)] == [MISS]
+    assert g.click((n.x, n.y), n.hit_time + cfg.window_50 + 0.02) is None or n.state == "missed"
+    from game import LABELS
+    assert LABELS == {GREAT: "PERFECT!", OK: "GREAT!", MEH: "GOOD!", MISS: "MISS!"}
+
+
+def test_explicit_timestamps_override_bpm_grid():
+    tr = dataclasses.replace(TRACK, timestamps=(5.0, 3.5, 4.25, 500.0))
+    assert note_times(CFG, tr, 2) == [3.5, 4.25, 5.0]
+
+
+def test_hit_sound_asset():
+    import wave
+    with wave.open(str(Path(__file__).resolve().parents[1] / "assets" / "hit.wav")) as w:
+        assert w.getframerate() == 44100 and 0.05 < w.getnframes() / w.getframerate() < 0.3
+
+
 def test_note_lock_and_finish():
     cfg = dataclasses.replace(CFG, rng_seed=3)
     g = GameCore(cfg); g.start(0.0, TRACK, 4)

@@ -15,7 +15,7 @@ import numpy as np
 import pygame
 
 from config import Config
-from game import GREAT, MEH, MISS, OK, GameCore, HitEvent, LABELS
+from game import GREAT, MEH, MISS, OK, GameCore
 from hand_tracker import HandState
 from input_pipeline import CursorState
 
@@ -137,8 +137,9 @@ class Renderer:
 
         # Menu / results layout. Buttons are large on purpose: they are "pinched" by hand.
         self.track_rects = [pygame.Rect(150, 270 + i * 95, 540, 76) for i in range(3)]
-        self.btn_start = pygame.Rect(800, 420, 330, 90)
-        self.btn_pace = pygame.Rect(800, 540, 330, 70)
+        self.btn_start = pygame.Rect(800, 392, 330, 86)
+        self.btn_pace = pygame.Rect(800, 496, 330, 64)
+        self.btn_mode = pygame.Rect(800, 574, 330, 64)
         self.btn_return = pygame.Rect(w // 2 - 165, 570, 330, 84)
         self.hud_rect = pygame.Rect(50, 20, w - 100, 74)
 
@@ -151,8 +152,10 @@ class Renderer:
 
         self.note_sprite = self._make_note_sprite()
         self.trail: deque = deque(maxlen=12)
-        self.texts: list[dict] = []
-        self.particles: list[dict] = []
+        self.popups: list[dict] = []         # floating judgement texts
+        self.sparks: list[dict] = []         # crimson / silver sparks
+        self.shatters: list[dict] = []       # expanding, fading heartagram "shatter" rings
+        self.shatter_frames = self._make_shatter_frames()
         self.click_rings: list[tuple[float, float, float]] = []
 
     # -- prebuilt surfaces ---------------------------------------------
@@ -190,6 +193,12 @@ class Renderer:
             pygame.draw.circle(s, COLOR_BLOOD, c, r - 6, 2)
             draw_heartagram(s, (c[0], c[1] + 2), int(r * 0.55), COLOR_WHITE, width=2)
         return s
+
+    def _make_shatter_frames(self) -> list:
+        """Pre-scaled blood-red logos for the 'shattering heart' burst (cheap to draw later)."""
+        r = self.cfg.note_radius
+        frames = [tinted_logo(int(2 * r * k), COLOR_BLOOD) for k in (1.0, 1.25, 1.5, 1.8, 2.15, 2.5)]
+        return [] if any(f is None for f in frames) else frames
 
     # -- background ------------------------------------------------------
     def begin(self, state: HandState, use_camera: bool = True) -> None:
@@ -246,7 +255,7 @@ class Renderer:
 
     # -- main menu -------------------------------------------------------
     def draw_menu(self, tracks, selected: int, pace_name: str, pace_beats: int,
-                  cur: CursorState) -> None:
+                  cur: CursorState, hit_mode: str = "pinch") -> None:
         scr = self.screen
         pulse = 0.5 + 0.5 * math.sin(time.perf_counter() * 1.6)      # slow "breathing" glow
         draw_logo(scr, (965, 215), 300, COLOR_PANEL, 255)
@@ -275,9 +284,11 @@ class Renderer:
         self._button(self.btn_start, "START RITE", self._hover(self.btn_start, cur))
         self._button(self.btn_pace, f"PACE: {pace_name}", self._hover(self.btn_pace, cur),
                      sub=f"a note every {pace_beats} beat{'s' if pace_beats > 1 else ''}")
+        self._button(self.btn_mode, f"HIT: {hit_mode.upper()}", self._hover(self.btn_mode, cur),
+                     sub="pinch on the target" if hit_mode == "pinch" else "just touch the target")
 
         self._text("Pinch thumb + index to click   |   UP/DOWN track   ENTER start   TAB pace"
-                   "   C camera   ESC quit", self.font_small, COLOR_SILVER,
+                   "   H hit mode   C camera   ESC quit", self.font_small, COLOR_SILVER,
                    (self.cfg.screen_w // 2, 692), center=True)
 
     # -- notes -----------------------------------------------------------
@@ -326,38 +337,68 @@ class Renderer:
             pygame.draw.circle(self.screen, COLOR_BLOOD, (x, y), 5)
 
     # -- effects ---------------------------------------------------------
-    def add_hit(self, ev: HitEvent) -> None:
-        col = HIT_COLORS[ev.points]
-        self.texts.append({"txt": LABELS[ev.points], "x": ev.x, "y": ev.y - self.cfg.note_radius - 8,
-                           "born": ev.at, "col": col})
-        if ev.points != MISS:
-            for _ in range(16):
-                a = random.uniform(0, math.tau)
-                v = random.uniform(140, 380)
-                self.particles.append({"x": ev.x, "y": ev.y, "vx": math.cos(a) * v,
-                                       "vy": math.sin(a) * v, "born": ev.at,
-                                       "col": random.choice((COLOR_BLOOD, COLOR_BLOOD, COLOR_SILVER))})
+    def add_popup(self, text: str, x: float, y: float, color, now: float) -> None:
+        """Floating judgement text (PERFECT! / GREAT! / MISS!) above the hit location."""
+        self.popups.append({"txt": text, "x": x, "y": y - self.cfg.note_radius - 10,
+                            "born": now, "col": color})
+
+    def spawn_particles(self, x: float, y: float, now: float) -> None:
+        """Crimson/silver spark explosion plus a shattering heartagram ring at (x, y)."""
+        for _ in range(self.cfg.particle_count):
+            a = random.uniform(0, math.tau)
+            v = random.uniform(180, 620)
+            self.sparks.append({"x": x, "y": y, "vx": math.cos(a) * v, "vy": math.sin(a) * v - 80,
+                                "born": now, "life": random.uniform(0.35, 0.65),
+                                "col": random.choice((COLOR_BLOOD, COLOR_BLOOD, COLOR_SILVER, COLOR_WHITE))})
+        self.shatters.append({"x": x, "y": y, "born": now})
 
     def add_click_ring(self, pos, now) -> None:
         self.click_rings.append((pos[0], pos[1], now))
 
     def clear_effects(self) -> None:
-        self.texts.clear()
-        self.particles.clear()
+        self.popups.clear()
+        self.sparks.clear()
+        self.shatters.clear()
         self.click_rings.clear()
 
     def draw_effects(self, now: float) -> None:
-        self.texts = [t for t in self.texts if now - t["born"] < 0.8]
-        for t in self.texts:
-            k = (now - t["born"]) / 0.8
-            self._text(t["txt"], self.font_judge, t["col"], (t["x"], t["y"] - 34 * k),
-                       alpha=255 * (1 - k), center=True)
-        self.particles = [p for p in self.particles if now - p["born"] < 0.55]
-        for p in self.particles:
+        # Shattering heart: the target's logo flies outwards and fades as the note disappears.
+        life = 0.35
+        self.shatters = [h for h in self.shatters if now - h["born"] < life]
+        for h in self.shatters:
+            k = (now - h["born"]) / life
+            if self.shatter_frames:
+                frame = self.shatter_frames[min(int(k * len(self.shatter_frames)), len(self.shatter_frames) - 1)]
+                frame.set_alpha(int(230 * (1 - k)))
+                self.screen.blit(frame, (int(h["x"] - frame.get_width() / 2),
+                                         int(h["y"] - frame.get_height() / 2)))
+            else:
+                self._alpha_circle(COLOR_BLOOD, self.cfg.note_radius * (1 + 1.5 * k), 230 * (1 - k),
+                                   (h["x"], h["y"]), 4)
+
+        # Sparks: short streaks that slow down, fall slightly and fade.
+        self.sparks = [p for p in self.sparks if now - p["born"] < p["life"]]
+        for p in self.sparks:
             dt = now - p["born"]
-            k = dt / 0.55
-            self._alpha_circle(p["col"], 6 * (1 - k) + 1, 255 * (1 - k),
-                               (p["x"] + p["vx"] * dt, p["y"] + p["vy"] * dt))
+            k = dt / p["life"]
+            drag = 1 - 0.55 * k                                   # decelerate
+            x = p["x"] + p["vx"] * dt * drag
+            y = p["y"] + p["vy"] * dt * drag + 420 * dt * dt      # gravity
+            tail = 0.035 * (1 - k)
+            x0, y0 = x - p["vx"] * tail, y - p["vy"] * tail
+            col = _lerp_color(p["col"], COLOR_WINE, k)
+            pygame.draw.line(self.screen, col, (int(x0), int(y0)), (int(x), int(y)), 3 if k < 0.5 else 2)
+
+        # Judgement pop-ups: quick rise + fade over cfg.popup_time (0.5 s).
+        dur = self.cfg.popup_time
+        self.popups = [t for t in self.popups if now - t["born"] < dur]
+        for t in self.popups:
+            k = (now - t["born"]) / dur
+            rise = 46 * (1 - (1 - k) ** 2)                        # fast at first, then settles
+            alpha = 255 if k < 0.6 else 255 * (1 - (k - 0.6) / 0.4)
+            self._text(t["txt"], self.font_judge, t["col"], (t["x"], t["y"] - rise),
+                       alpha=alpha, center=True)
+
         self.click_rings = [r for r in self.click_rings if now - r[2] < 0.3]
         for x, y, born in self.click_rings:
             k = (now - born) / 0.3
@@ -409,7 +450,7 @@ class Renderer:
         rows = [("SCORE", f"{core.score:07d}"),
                 ("ACCURACY", f"{core.accuracy:.2f}%"),
                 ("MAX COMBO", f"{core.max_combo}x"),
-                ("300 / 100 / 50 / MISS", f"{core.counts[GREAT]} / {core.counts[OK]} / "
+                ("PERFECT / GREAT / GOOD / MISS", f"{core.counts[GREAT]} / {core.counts[OK]} / "
                                            f"{core.counts[MEH]} / {core.counts[MISS]}"),
                 ("MEAN TIMING", f"{core.mean_offset_ms:+.0f} ms")]
         for i, (label, value) in enumerate(rows):
