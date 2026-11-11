@@ -9,8 +9,17 @@ Flow:  MAIN MENU (pick 1 of 3 HIM tracks, pick pace)  ->  PLAY  ->  RESULTS  -> 
 
 AUDIO: the three mp3 files live in the  songs/  folder next to this file. Their file
 names, BPM and beat offsets are listed in TRACKS in config.py; the files are loaded in
-start_music() below. The hit sound is  assets/hit.wav  (see load_hit_sound()).
+AdaptiveAudio.start() below. The hit sound is  assets/hit.wav  (see load_hit_sound()).
 Speed and difficulty knobs are in the "Rhythm / speed" block of config.py.
+
+ADAPTIVE AUDIO (class AdaptiveAudio below): the music reacts to how you play.
+  * "stems" mode - two synchronized files per song in  songs/stems/ :
+        <name>_backing.ogg  (melody, vocals, pads)  -> always plays
+        <name>_drums.ogg    (drums / beat)          -> heard ONLY while you hit on time
+    Each hit opens the drum stem until the next note is due; a miss mutes it.
+  * "duck" mode - fallback when a song has no stems: the single file plays quietly,
+    a hit restores full volume, a miss cuts it to silence for a moment.
+  Create stems with  python tools/make_stems.py  (already done for the three songs).
 
 RHYTHM: notes come from game.note_times() - one note every N beats of the selected
 track's BPM grid - and can only be hit inside their timing window (GameCore.click).
@@ -27,12 +36,21 @@ from pathlib import Path
 import pygame
 
 from config import CFG, PACES, TRACKS
-from game import LABELS, MISS, GameCore, HitEvent
+from game import GREAT, LABELS, MISS, OK, GameCore, HitEvent
 from input_pipeline import CursorController
 from render import HIT_COLORS, Renderer, make_window_icon
 
 # >>> AUDIO: folder that holds the song files (funeral_of_hearts.mp3, ...).
 SONGS_DIR = Path(__file__).parent / "songs"
+
+# >>> AUDIO STEMS: for the adaptive "stems" mode put two files per song here:
+#       songs/stems/funeral_of_hearts_backing.ogg     songs/stems/funeral_of_hearts_drums.ogg
+#       songs/stems/join_me_in_death_backing.ogg      songs/stems/join_me_in_death_drums.ogg
+#       songs/stems/bury_me_deep_inside_backing.ogg   songs/stems/bury_me_deep_inside_drums.ogg
+# i.e. <song file name without .mp3> + "_backing.ogg" / "_drums.ogg" (ogg or wav content,
+# same length, both starting at 0:00 so they stay in sync).
+STEMS_DIR = SONGS_DIR / "stems"
+MUSIC_MODES = ("auto", "stems", "duck", "off")
 
 # >>> HIT SOUND: put your own sound here as  osu_cv_project/assets/hit.wav
 # (short, < 0.3 s, wav or ogg). A synthesized gothic hit-clap is already there;
@@ -40,7 +58,7 @@ SONGS_DIR = Path(__file__).parent / "songs"
 HIT_SOUND_PATH = Path(__file__).parent / "assets" / "hit.wav"
 
 # Objects the feedback functions below need; filled in once by main().
-_fx = {"renderer": None, "hit_sound": None}
+_fx = {"renderer": None, "hit_sound": None, "audio": None, "core": None}
 
 
 # ----------------------------------------------------------------------------- setup
@@ -61,6 +79,8 @@ def parse_args():
                    help="shift notes against the music, seconds (+ = later)")
     p.add_argument("--hit-mode", choices=["pinch", "touch"], default=None,
                    help="pinch = click on the target, touch = just move the hand onto it")
+    p.add_argument("--music", choices=list(MUSIC_MODES), default=None,
+                   help="adaptive audio: stems (drums follow your hits), duck, off, auto")
     p.add_argument("--full-song", action="store_true", help="play the whole track")
     p.add_argument("--seed", type=int, default=None, help="fixed beatmap seed (reproducible runs)")
     p.add_argument("--fullscreen", action="store_true")
@@ -71,7 +91,7 @@ def build_config(args):
     mapping = {"weights": "weights", "device": "yolo_device", "imgsz": "yolo_imgsz",
                "conf": "yolo_conf", "anchor": "cursor_anchor", "camera": "camera_index",
                "smoother": "smoother", "approach": "approach_time",
-               "audio_offset": "audio_offset_s", "seed": "rng_seed", "hit_mode": "hit_mode"}
+               "audio_offset": "audio_offset_s", "seed": "rng_seed", "hit_mode": "hit_mode", "music": "adaptive_audio"}
     over = {cfg_key: getattr(args, arg) for arg, cfg_key in mapping.items()
             if getattr(args, arg) is not None}
     if args.full_song:
@@ -106,37 +126,172 @@ def init_audio() -> bool:
         return False
 
 
-def start_music(track, cfg, audio_ok: bool) -> str | None:
-    """Load and start the selected track. Returns a warning text, or None if it plays.
+def stem_paths(track) -> tuple[Path, Path]:
+    """(backing, drums) stem files that belong to a track."""
+    base = Path(track.file).stem
+    return STEMS_DIR / f"{base}_backing.ogg", STEMS_DIR / f"{base}_drums.ogg"
 
-    >>> AUDIO FILES ARE LOADED HERE <<<
-    track.file comes from TRACKS in config.py and is looked up in songs/.
-    pygame.mixer.music streams the file from disk (mp3, ogg and wav all work).
+
+class AdaptiveAudio:
+    """Interactive music: what you hear depends on how you play.
+
+    One number drives everything: `gain` (0..1) = "how alive the beat is".
+      on_hit()  -> gain target = 1.0 / 0.85 / 0.6 (PERFECT / GREAT / GOOD), held until the
+                   next note is due. Keep hitting and the beat never drops out.
+      on_miss() -> gain target = 0 at once.
+    update() glides gain towards its target every frame (short fades, no clicks) and
+    applies it:
+      "stems": backing stem at full volume on mixer Channel 0 (never touched);
+               drum stem on Channel 1 with volume = gain  -> silent beat when you miss.
+      "duck":  the single song file via pygame.mixer.music with
+               volume = duck_level + (1 - duck_level) * gain, and 0 for `stumble_time`
+               seconds after a miss.
+      "off":   plain playback.
+    The hit-clap (play_hit_sound) uses the remaining free channels.
     """
-    if not audio_ok:
-        return "No audio device - playing without sound"
-    path = SONGS_DIR / track.file
-    if not path.is_file():
-        return f"Missing audio file songs/{track.file} - playing without sound"
-    try:
-        pygame.mixer.music.load(str(path))               # <-- load the song file
-        pygame.mixer.music.set_volume(cfg.music_volume)
-        pygame.mixer.music.play()                        # <-- playback starts at song time 0
-        return None
-    except pygame.error as e:
-        return f"Cannot play songs/{track.file} ({e}) - playing without sound"
+
+    BACKING_CHANNEL, DRUMS_CHANNEL = 0, 1
+
+    def __init__(self, cfg, audio_ok: bool):
+        self.cfg = cfg
+        self.ok = audio_ok
+        self.mode = "off"                 # what is active right now: stems | duck | off
+        self.gain = 0.0                   # current beat level (smoothed)
+        self._hit_gain = 0.0              # level granted by the last hit
+        self._open_until = -1.0           # song time until which the beat stays alive
+        self._stumble_until = -1.0        # "duck" mode: silent until this song time
+        self._playing = False
+        self._cache: dict = {}            # last loaded stems: {track.file: (backing, drums)}
+        self._ch_backing = self._ch_drums = None
+        if audio_ok:
+            try:
+                pygame.mixer.set_reserved(2)          # channels 0+1 belong to the stems
+                self._ch_backing = pygame.mixer.Channel(self.BACKING_CHANNEL)
+                self._ch_drums = pygame.mixer.Channel(self.DRUMS_CHANNEL)
+            except pygame.error as e:
+                print(f"[audio] cannot reserve mixer channels: {e}")
+
+    # -- which mode will a track get? --------------------------------------
+    def resolve_mode(self, track, wanted: str) -> str:
+        has_stems = self._ch_drums is not None and all(p.is_file() for p in stem_paths(track))
+        if wanted == "auto":
+            return "stems" if has_stems else "duck"
+        if wanted == "stems" and not has_stems:
+            return "duck"                 # asked for stems but the files are missing
+        return wanted
+
+    # -- start / stop -------------------------------------------------------
+    def start(self, track, wanted: str) -> str | None:
+        """Load and start the music for `track`. Returns a warning text or None.
+        Song time 0 is the moment this function returns."""
+        self.stop()
+        self.gain, self._hit_gain = 0.0, 0.0
+        self._open_until = self._stumble_until = -1.0
+        self.mode = "off"
+        if not self.ok:
+            return "No audio device - playing without sound"
+        mode = self.resolve_mode(track, wanted)
+        note = None
+        if wanted == "stems" and mode != "stems":
+            note = "No stems for this song in songs/stems/ - using volume ducking instead"
+
+        if mode == "stems":
+            try:
+                backing, drums = self._load_stems(track)
+                # >>> BOTH STEMS START HERE, back to back, so they stay sample-aligned <<<
+                self._ch_backing.play(backing)
+                self._ch_drums.play(drums)
+                self._ch_drums.set_volume(0.0)                    # beat is silent until you hit
+                self._ch_backing.set_volume(self.cfg.music_volume)
+                self.mode, self._playing = "stems", True
+                return note
+            except (pygame.error, OSError) as e:
+                note = f"Cannot play stems ({e}) - using the single track"
+                mode = "duck"
+
+        # Single-file playback ("duck" fallback or "off").
+        path = SONGS_DIR / track.file
+        if not path.is_file():
+            return f"Missing audio file songs/{track.file} - playing without sound"
+        try:
+            pygame.mixer.music.load(str(path))                    # <-- the full song file is loaded here
+            start_volume = self.cfg.duck_level if mode == "duck" else 1.0
+            pygame.mixer.music.set_volume(self.cfg.music_volume * start_volume)
+            pygame.mixer.music.play()
+            self.mode, self._playing = mode, True
+            return note
+        except pygame.error as e:
+            return f"Cannot play songs/{track.file} ({e}) - playing without sound"
+
+    def _load_stems(self, track):
+        """>>> THE TWO STEM FILES ARE LOADED HERE <<< (decoded fully into memory, ~50 MB each)."""
+        if track.file not in self._cache:
+            backing_path, drums_path = stem_paths(track)
+            self._cache = {track.file: (pygame.mixer.Sound(str(backing_path)),     # melody / vocals / pads
+                                        pygame.mixer.Sound(str(drums_path)))}      # drums / beat
+        return self._cache[track.file]
+
+    def stop(self, fade_ms: int = 0) -> None:
+        if not self.ok or not self._playing:
+            return
+        self._playing = False             # update() stops touching the volumes during a fade-out
+        try:
+            if self.mode == "stems":
+                for ch in (self._ch_backing, self._ch_drums):
+                    ch.fadeout(fade_ms) if fade_ms else ch.stop()
+            elif fade_ms:
+                pygame.mixer.music.fadeout(fade_ms)
+            else:
+                pygame.mixer.music.stop()
+        except pygame.error:
+            pass
+
+    # -- performance events -----------------------------------------------
+    def on_hit(self, points: int, open_until: float) -> None:
+        """A note was hit on time: bring the beat back until `open_until` (song time
+        at which the next note would be missed)."""
+        c = self.cfg
+        self._hit_gain = (c.drum_gain_perfect if points == GREAT else
+                          c.drum_gain_great if points == OK else c.drum_gain_good)
+        self._open_until = open_until
+        self._stumble_until = -1.0
+
+    def on_miss(self, song_time: float) -> None:
+        """A note was skipped: the beat dies (and "duck" mode stumbles into silence)."""
+        self._open_until = -1.0
+        self._stumble_until = song_time + self.cfg.stumble_time
+
+    @property
+    def beat_alive(self) -> bool:
+        return self.gain > 0.05
+
+    # -- per frame ----------------------------------------------------------
+    def update(self, song_time: float, dt: float) -> None:
+        c = self.cfg
+        target = self._hit_gain if song_time < self._open_until else 0.0
+        step = dt / max(c.audio_attack_s if target > self.gain else c.audio_release_s, 1e-3)
+        self.gain += max(-step, min(step, target - self.gain))
+        if not self._playing:
+            return
+        try:
+            if self.mode == "stems":
+                self._ch_drums.set_volume(c.music_volume * self.gain)
+            elif self.mode == "duck":
+                level = c.duck_level + (1.0 - c.duck_level) * self.gain
+                if song_time < self._stumble_until:
+                    level = 0.0                                   # stumble: music drops out
+                pygame.mixer.music.set_volume(c.music_volume * level)
+        except pygame.error:
+            pass
 
 
-def stop_music(audio_ok: bool, fade_ms: int = 0) -> None:
-    if not audio_ok:
-        return
-    try:
-        if fade_ms:
-            pygame.mixer.music.fadeout(fade_ms)
-        else:
-            pygame.mixer.music.stop()
-    except pygame.error:
-        pass
+def music_label(audio: AdaptiveAudio, track, wanted: str) -> str:
+    """Menu text: which adaptive-audio mode the selected track will use."""
+    mode = audio.resolve_mode(track, wanted) if audio.ok else "off"
+    text = {"stems": "STEMS - drums play only while you hit on time",
+            "duck": "DUCK - volume drops when you miss" + ("" if wanted != "stems" else " (no stems found)"),
+            "off": "OFF - plain playback"}[mode]
+    return f"MUSIC: {text}   [M]"
 
 
 # ----------------------------------------------------------------------------- hit feedback
@@ -187,10 +342,16 @@ def show_score_popup(text: str, x: float, y: float) -> None:
 
 def on_judgement(ev: HitEvent) -> None:
     """All feedback for one judged note (a hit, or a note that was skipped)."""
+    audio, core = _fx["audio"], _fx["core"]
     show_score_popup(LABELS[ev.points], ev.x, ev.y)
-    if ev.points != MISS:                 # misses: text only, no sound, no sparks
+    if ev.points != MISS:
         play_hit_sound()
         spawn_hit_particles(ev.x, ev.y)
+        # ADAPTIVE AUDIO: the beat comes back and stays until the next note is due.
+        audio.on_hit(ev.points, core.next_deadline())
+    else:
+        # ADAPTIVE AUDIO: skipped note -> the drums fall silent (text only, no clap, no sparks).
+        audio.on_miss(core.song_time(ev.at))
 
 
 # ----------------------------------------------------------------------------- main
@@ -220,11 +381,15 @@ def main() -> None:
     renderer = Renderer(screen, cfg)
     _fx["renderer"] = renderer
     _fx["hit_sound"] = load_hit_sound(cfg, audio_ok)      # assets/hit.wav
+    audio = AdaptiveAudio(cfg, audio_ok)                  # stems / ducking music engine
+    _fx["audio"], _fx["core"] = audio, core
 
     mode = "menu"                          # menu | play | results
     selected = 0                           # index into TRACKS
     pace = min(max(cfg.default_pace, 0), len(PACES) - 1)   # index into PACES
     hit_mode = cfg.hit_mode                # "pinch" or "touch" (menu button / H key)
+    music_mode = cfg.adaptive_audio        # auto | stems | duck | off (M key)
+    last_frame = time.perf_counter()
     show_camera = cfg.camera_background
     audio_note = None                      # warning if the song could not be played
     music_faded = False
@@ -233,7 +398,9 @@ def main() -> None:
         nonlocal audio_note, music_faded
         track = TRACKS[selected]
         renderer.clear_effects()
-        audio_note = start_music(track, cfg, audio_ok)
+        renderer.draw_status("Loading audio ...", warn=False)   # decoding stems takes a moment
+        pygame.display.flip()
+        audio_note = audio.start(track, music_mode)       # backing + drum stems (or single file)
         # Song time 0 = the moment playback starts; notes are placed on the track's
         # beat grid (bpm + offset from config.py), every PACES[pace] beats.
         core.start(time.perf_counter(), track, PACES[pace][1])
@@ -241,7 +408,7 @@ def main() -> None:
         return "play"
 
     def to_menu() -> str:
-        stop_music(audio_ok)
+        audio.stop()
         renderer.clear_effects()
         return "menu"
 
@@ -249,6 +416,7 @@ def main() -> None:
         running = True
         while running:
             now = time.perf_counter()
+            dt, last_frame = now - last_frame, now
 
             # ---- input: hand / mouse cursor --------------------------------
             state = tracker.get_state()
@@ -274,6 +442,8 @@ def main() -> None:
                         show_camera = not show_camera
                     elif e.key == pygame.K_h and mode == "menu":
                         hit_mode = "touch" if hit_mode == "pinch" else "pinch"
+                    elif e.key == pygame.K_m and mode == "menu":
+                        music_mode = MUSIC_MODES[(MUSIC_MODES.index(music_mode) + 1) % len(MUSIC_MODES)]
                     elif e.key == pygame.K_SPACE and cur.visible:
                         click_pos, click_t = cur.pos, now    # keyboard "pinch" at the cursor
                     elif mode == "menu":
@@ -304,7 +474,8 @@ def main() -> None:
                     elif renderer.btn_start.collidepoint(click_pos):
                         mode = start_game()              # launch the game loop
                 if mode == "menu":
-                    renderer.draw_menu(TRACKS, selected, PACES[pace][0], PACES[pace][1], cur, hit_mode)
+                    renderer.draw_menu(TRACKS, selected, PACES[pace][0], PACES[pace][1], cur, hit_mode,
+                                       music_label(audio, TRACKS[selected], music_mode))
 
             elif mode == "play":
                 # 1) Hit attempts. A hit registers only if the cursor is on the earliest
@@ -320,11 +491,14 @@ def main() -> None:
                 # 2) Notes whose window passed without a hit -> "MISS!" pop-up.
                 for miss in core.update(now):
                     on_judgement(miss)
+                # 3) Adaptive audio: fade the drum stem (or the song volume) towards
+                #    "alive" after hits and towards silence after misses.
+                audio.update(core.song_time(now), dt)
                 renderer.draw_notes(core, now)
-                renderer.draw_hud(core, now)
+                renderer.draw_hud(core, now, beat=(audio.mode, audio.beat_alive))
                 if core.finished:
                     if not music_faded:
-                        stop_music(audio_ok, fade_ms=1500)
+                        audio.stop(fade_ms=1500)
                         music_faded = True
                     if core.song_time(now) > core.end_time:
                         mode = "results"
@@ -348,7 +522,7 @@ def main() -> None:
             pygame.display.flip()
             clock.tick(cfg.fps)
     finally:
-        stop_music(audio_ok)
+        audio.stop()
         tracker.stop()
         pygame.quit()
 

@@ -255,7 +255,7 @@ class Renderer:
 
     # -- main menu -------------------------------------------------------
     def draw_menu(self, tracks, selected: int, pace_name: str, pace_beats: int,
-                  cur: CursorState, hit_mode: str = "pinch") -> None:
+                  cur: CursorState, hit_mode: str = "pinch", music: str = "") -> None:
         scr = self.screen
         pulse = 0.5 + 0.5 * math.sin(time.perf_counter() * 1.6)      # slow "breathing" glow
         draw_logo(scr, (965, 215), 300, COLOR_PANEL, 255)
@@ -280,6 +280,9 @@ class Renderer:
                        (rect.x + 48, rect.centery - (16 if sel else 12)), shadow=False)
             bpm = self.font_small.render(f"{track.bpm:.0f} BPM", True, COLOR_SILVER)
             scr.blit(bpm, (rect.right - bpm.get_width() - 18, rect.centery - 9))
+
+        if music:
+            self._text(music, self.font_small, COLOR_SILVER, (150, 556))
 
         self._button(self.btn_start, "START RITE", self._hover(self.btn_start, cur))
         self._button(self.btn_pace, f"PACE: {pace_name}", self._hover(self.btn_pace, cur),
@@ -405,8 +408,14 @@ class Renderer:
             self._alpha_circle(COLOR_WHITE, 20 + 40 * k, 220 * (1 - k), (x, y), 3)
 
     # -- in-game HUD -----------------------------------------------------
-    def draw_hud(self, core: GameCore, now: float) -> None:
+    def draw_hud(self, core: GameCore, now: float, beat: tuple | None = None) -> None:
         scr, hud = self.screen, self.hud_rect
+        if beat is not None and beat[0] in ("stems", "duck"):    # adaptive-audio indicator
+            what = "DRUMS" if beat[0] == "stems" else "MUSIC"
+            alive = beat[1]
+            pygame.draw.circle(scr, COLOR_WHITE if alive else COLOR_WINE, (hud.x + 12, hud.bottom + 18), 6)
+            self._text(f"{what}: {'ALIVE' if alive else 'SILENT - hit the beat'}", self.font_small,
+                       COLOR_SILVER if alive else COLOR_BLOOD, (hud.x + 26, hud.bottom + 8))
         draw_gothic_frame(scr, hud, COLOR_SILVER, COLOR_PANEL, 205)
         self._text(f"SCORE: {core.score:07d}", self.font_header, COLOR_SILVER, (hud.x + 30, hud.y + 21))
         self._text(f"COMBO: {core.combo}x", self.font_header, COLOR_BLOOD, (hud.x + 350, hud.y + 21))

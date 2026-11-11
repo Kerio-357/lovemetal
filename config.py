@@ -91,16 +91,36 @@ class Config:
     max_song_seconds: float | None = 90.0   # play only this much of a track; None = whole song
     audio_offset_s: float = 0.0        # + = notes later, - = earlier (fix audio/video lag here)
     music_volume: float = 0.8
-    # Judgement windows, seconds either side of the beat.
-    window_300: float = 0.12
-    window_100: float = 0.22
-    window_50: float = 0.35
+    # STRICT BEAT WINDOW: judgement windows are fractions of ONE BEAT of the selected
+    # song (either side of the note's beat), so they tighten automatically with tempo.
+    # At 114 BPM a beat is 0.526 s -> PERFECT +-0.095 s, GREAT +-0.158 s, GOOD +-0.237 s.
+    # Outside the GOOD window a hit attempt does nothing and the note becomes a MISS.
+    # Raise these three numbers to make timing more forgiving.
+    window_beats_perfect: float = 0.18
+    window_beats_great: float = 0.30
+    window_beats_good: float = 0.45
+
+    # --- Adaptive audio: the music reacts to how you play --------------------
+    # "stems": backing track always plays; the DRUM stem is heard only while you hit
+    #          notes on time (needs songs/stems/<name>_backing.ogg + <name>_drums.ogg).
+    # "duck":  single-file fallback - the song is quiet by default, a hit restores full
+    #          volume until the next note is due, a miss cuts it to silence for a moment.
+    # "off":   the song just plays.
+    # "auto":  "stems" when both stem files exist for the track, otherwise "duck".
+    adaptive_audio: str = "auto"
+    drum_gain_perfect: float = 1.0     # drum stem volume after a PERFECT / GREAT / GOOD hit
+    drum_gain_great: float = 0.85
+    drum_gain_good: float = 0.6
+    audio_attack_s: float = 0.02       # fade-in time when the beat comes back (no clicks)
+    audio_release_s: float = 0.10      # fade-out time when it is lost
+    duck_level: float = 0.30           # "duck" mode: volume while you are not hitting (0..1)
+    stumble_time: float = 0.40         # "duck" mode: seconds of silence after a miss
 
     # --- Hit rule and hit feedback -----------------------------------------
     # "pinch": the cursor must be on the target AND you pinch (click) inside its window.
     # "touch": moving the hand onto the target inside its window is enough (easier).
     hit_mode: str = "pinch"
-    touch_window: float = 0.22         # touch mode: a note becomes touchable this long before its beat
+    touch_window_beats: float = 0.30   # touch mode: a note becomes touchable this many beats early
     hit_volume: float = 0.7            # loudness of assets/hit.wav (0..1)
     popup_time: float = 0.5            # seconds the PERFECT! / GREAT! / MISS! text stays
     particle_count: int = 26           # sparks per hit

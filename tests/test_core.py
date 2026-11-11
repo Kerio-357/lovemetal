@@ -97,14 +97,14 @@ def test_game_judgement_and_scoring():
     g = GameCore(cfg); g.start(100.0, TRACK, 2)
     n0, n1, n2 = g.notes[:3]
     assert g.click((n0.x, n0.y), 100.0 + n0.hit_time - 1.0) is None          # too early -> ignored
-    ev = g.click((n0.x, n0.y), 100.0 + n0.hit_time + 0.05)
+    ev = g.click((n0.x, n0.y), 100.0 + n0.hit_time + 0.03)
     assert ev.points == GREAT and g.combo == 1
     assert g.click((n1.x + 300, n1.y), 100.0 + n1.hit_time) is None and g.combo == 1   # beside the note
     edge = cfg.note_radius * cfg.hit_forgiveness - 1                         # forgiving hit radius
-    ev = g.click((n1.x + edge, n1.y), 100.0 + n1.hit_time + 0.2)
+    ev = g.click((n1.x + edge, n1.y), 100.0 + n1.hit_time + 0.13)
     assert ev.points == OK
     h = g.health
-    evs = g.update(100.0 + n2.hit_time + cfg.window_50 + 0.01)               # never hit -> miss
+    evs = g.update(100.0 + n2.hit_time + g.w_good + 0.01)               # never hit -> miss
     assert [e.points for e in evs] == [MISS] and g.combo == 0 and g.health < h
     assert g.max_combo == 2 and 0 < g.accuracy < 100 and not g.finished
 
@@ -113,20 +113,33 @@ def test_timing_window_and_touch_mode():
     cfg = dataclasses.replace(CFG, rng_seed=2)
     g = GameCore(cfg); g.start(0.0, TRACK, 2)
     n = g.notes[0]
-    assert g.click((n.x, n.y), n.hit_time - cfg.window_50 - 0.01) is None     # before the window
-    assert g.touch((n.x, n.y), n.hit_time - cfg.touch_window - 0.01) is None  # touch opens later
+    assert g.click((n.x, n.y), n.hit_time - g.w_good - 0.01) is None     # before the window
+    assert g.touch((n.x, n.y), n.hit_time - g.w_touch - 0.01) is None  # touch opens later
     assert g.touch((n.x + 400, n.y), n.hit_time) is None                      # not on the target
     assert n.state == "pending"
     assert g.touch((n.x, n.y), n.hit_time + 0.02).points == GREAT             # on the beat -> PERFECT!
     n = g.notes[1]
-    assert g.touch((n.x, n.y), n.hit_time - cfg.touch_window + 0.001).points == OK   # hand waiting early
+    assert g.touch((n.x, n.y), n.hit_time - g.w_touch + 0.001).points == OK   # hand waiting early
     n = g.notes[2]
-    assert g.click((n.x, n.y), n.hit_time + cfg.window_50 - 0.01).points == MEH      # late edge
+    assert g.click((n.x, n.y), n.hit_time + g.w_good - 0.01).points == MEH      # late edge
     n = g.notes[3]
-    assert [e.points for e in g.update(n.hit_time + cfg.window_50 + 0.01)] == [MISS]
-    assert g.click((n.x, n.y), n.hit_time + cfg.window_50 + 0.02) is None or n.state == "missed"
+    assert [e.points for e in g.update(n.hit_time + g.w_good + 0.01)] == [MISS]
+    assert g.click((n.x, n.y), n.hit_time + g.w_good + 0.02) is None or n.state == "missed"
     from game import LABELS
     assert LABELS == {GREAT: "PERFECT!", OK: "GREAT!", MEH: "GOOD!", MISS: "MISS!"}
+
+
+def test_windows_scale_with_bpm():
+    g = GameCore(CFG)
+    for track in TRACKS:
+        g.start(0.0, track, 2)
+        beat = 60.0 / track.bpm
+        assert abs(g.w_perfect - CFG.window_beats_perfect * beat) < 1e-12
+        assert g.w_perfect < g.w_great < g.w_good < beat / 2          # never overlaps the next beat
+        assert g.next_deadline() == g.notes[0].hit_time + g.w_good
+    fast, slow = GameCore(CFG), GameCore(CFG)
+    fast.start(0.0, TRACKS[0], 2); slow.start(0.0, TRACKS[2], 2)
+    assert fast.w_good < slow.w_good                                   # faster song -> tighter window
 
 
 def test_explicit_timestamps_override_bpm_grid():
