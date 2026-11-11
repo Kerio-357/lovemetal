@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+models/
+
+# copyrighted music: keep the mp3 files local (put them in songs/ with the names from config.py)
+songs/*.mp3
