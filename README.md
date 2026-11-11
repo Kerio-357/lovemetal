@@ -9,7 +9,7 @@ Hand-tracked gothic rhythm game: YOLOv8-pose (`best.pt`, 21 hand keypoints) + Op
     python main.py --full-song      # whole tracks instead of the first 90 s
 
 Controls: move hand = cursor, pinch thumb+index = click.
-Keyboard: UP/DOWN track, TAB pace, ENTER start, SPACE click, C camera background, ESC menu/quit.
+Keyboard: UP/DOWN track, TAB pace, M music mode, ENTER start, P pinch meter, [ ] pinch sensitivity, C camera background, ESC menu/quit.
 
 ## Songs
 The mp3 files and their stems are **not** in this repository (copyrighted). Put your own files into `songs/` using the names from `TRACKS` in
@@ -18,8 +18,21 @@ Without them the game still runs, silently.
 Audio files live in `songs/`. Each track's file name, BPM and beat offset are in `TRACKS`
 in `config.py`; notes are placed on that beat grid. Files are loaded in `start_music()` in `main.py`.
 
+## Pinch input
+A note is hit only by a **pinch** (thumb tip + index tip together): cursor inside the note + pinch + inside the beat window.
+Hovering does nothing, and a held pinch does not repeat. The gesture is measured as
+`pinch_ratio = fingertip distance / palm size`; it fires when the ratio drops below `pinch_close_thresh` (0.28) and re-arms above
+`pinch_open_thresh` (0.42). Tune with the pinch meter (`P`), the `[` / `]` keys (live), `--pinch 0.32`, or `config.py`.
+
+## Performance
+- YOLO runs on a 320 px copy of the frame (`yolo_imgsz`, `--imgsz`); the full-screen picture keeps the camera resolution.
+- A grabber thread keeps only the newest camera frame, so a slow model skips frames instead of lagging behind.
+- The cursor is extrapolated between camera frames (`cursor_predict_s`) and drawn at 60 fps (`clock.tick(60)`).
+- If drawing is too slow, every second frame is skipped while input and audio still run every loop (`frame_skip`, `--no-frame-skip`).
+- The HUD shows render fps, tracking rate and model time.
+
 ## Adaptive audio (the music reacts to your playing)
-`AdaptiveAudio` in `main.py`. Modes (`M` key in the menu, `--music stems|duck|off|auto`, `adaptive_audio` in `config.py`):
+`AdaptiveAudio` in `main.py`. Modes (MUSIC button or `M` key in the menu, `--music stems|duck|off|auto`, `adaptive_audio` in `config.py`):
 
 | Mode | What you hear |
 |---|---|
@@ -33,8 +46,7 @@ stems from a neural separator such as Demucs sound cleaner - save them under the
 
 ## Hit feedback
 Every judged note goes through `on_judgement()` in `main.py`, which calls `play_hit_sound()`, `spawn_hit_particles(x, y)` and
-`show_score_popup(text, x, y)`. The hit sound is `assets/hit.wav` (replace the file to change it). Hit rule: `HIT: PINCH`
-(pinch on the target) or `HIT: TOUCH` (just move the hand onto it) - menu button, `H` key or `--hit-mode touch`.
+`show_score_popup(text, x, y)`. The hit sound is `assets/hit.wav` (replace the file to change it).
 
 ## Logo / icon
 `assets/heartagram.png` (white on transparent) is the window icon, the menu crest, the face of every target and the
@@ -46,7 +58,8 @@ backdrop when the camera is off. Swap the file to change it; if it is missing th
 | `PACES`, `default_pace` | beats between notes (SLOW 4, NORMAL 2, FAST 1) |
 | `approach_time` | how long a note is visible before its beat |
 | `window_beats_perfect/great/good` | timing tolerance as a fraction of one beat (0.18 / 0.30 / 0.45) |
-| `hit_mode`, `touch_window_beats` | pinch or touch to hit; how early a touch counts |
+| `pinch_close_thresh`, `pinch_open_thresh`, `pinch_instant_ratio` | pinch sensitivity |
+| `kalman_process_noise`, `cursor_predict_s` | cursor smoothness vs. responsiveness |
 | `drum_gain_*`, `duck_level`, `stumble_time`, `audio_attack_s/release_s` | adaptive audio behaviour |
 | `hit_volume`, `popup_time`, `particle_count` | hit feedback |
 | `note_radius`, `hit_forgiveness` | target size and hit radius |

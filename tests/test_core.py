@@ -43,6 +43,40 @@ def test_pinch_hysteresis_and_single_click():
     assert len(clicks) == 1 and not pinched
 
 
+def test_pinch_instant_borderline_and_sensitivity():
+    d = PinchClickDetector(CFG)
+    assert d.update(1.0, 0.0) == (False, None)
+    assert d.update(0.10, 0.033) == (True, 0.033)            # clearly closed: fires on the first frame
+    assert d.update(0.10, 0.066) == (True, None)             # held pinch: no repeat events
+    assert d.update(0.35, 0.10) == (True, None)              # inside the hysteresis band: still pinched
+    d.update(0.9, 0.2); d.update(0.9, 0.233)                 # opened
+    assert not d.pinched
+    assert d.update(0.25, 0.40) == (False, None)             # borderline: needs a second frame
+    assert d.update(0.25, 0.433) == (True, 0.40)             # confirmed, stamped with the first frame
+    d.update(0.9, 0.6); d.update(0.9, 0.633)
+    assert d.update(0.25, 0.80)[1] is None and d.update(0.9, 0.833)[0] is False   # one-frame glitch ignored
+    d.set_sensitivity(0.20)                                  # stricter: 0.25 no longer counts
+    assert abs(d.open_thresh - 0.30) < 1e-9
+    assert d.update(0.25, 1.0)[0] is False and d.update(0.25, 1.033)[0] is False
+    d.set_sensitivity(5); assert d.close_thresh == 0.60
+
+
+def test_cursor_prediction_follows_fast_hand():
+    lag = {}
+    for name, cfg in (("off", dataclasses.replace(CFG, cursor_predict_s=0.0)), ("on", CFG)):
+        c = CursorController(cfg); errs = []
+        for i in range(120):                                 # hand moving right at 900 px/s, 30 fps camera
+            t = i / 30; st = HandState(True, (100 + 900 * t, 300.0), 1.0, t, i)
+            for sub in (0.035, 0.035 + 1 / 60):              # result arrives 35 ms late, drawn at 60 fps
+                cur = c.update(st, t + sub)
+                if i > 30 and cur.pos[0] < CFG.screen_w - 2: errs.append(100 + 900 * (t + sub) - cur.pos[0])
+        lag[name] = sum(errs) / len(errs)
+    assert lag["on"] < 0.3 * lag["off"] and lag["off"] > 25, lag
+    c = CursorController(CFG)                                # resting hand: no look-ahead, no drift
+    for i in range(30): cur = c.update(HandState(True, (500.0, 300.0), 1.0, i / 30, i), i / 30 + 0.04)
+    assert abs(cur.pos[0] - 500) < 0.5 and abs(cur.pos[1] - 300) < 0.5
+
+
 def test_cursor_parks_on_loss():
     c = CursorController(CFG)
     cur = c.update(HandState(True, (100, 100), 1.0, 1.0, 1), 1.0)
@@ -109,22 +143,21 @@ def test_game_judgement_and_scoring():
     assert g.max_combo == 2 and 0 < g.accuracy < 100 and not g.finished
 
 
-def test_timing_window_and_touch_mode():
+def test_timing_window_is_strict():
     cfg = dataclasses.replace(CFG, rng_seed=2)
     g = GameCore(cfg); g.start(0.0, TRACK, 2)
     n = g.notes[0]
-    assert g.click((n.x, n.y), n.hit_time - g.w_good - 0.01) is None     # before the window
-    assert g.touch((n.x, n.y), n.hit_time - g.w_touch - 0.01) is None  # touch opens later
-    assert g.touch((n.x + 400, n.y), n.hit_time) is None                      # not on the target
+    assert g.click((n.x, n.y), n.hit_time - g.w_good - 0.01) is None          # pinch before the window
+    assert g.click((n.x + 400, n.y), n.hit_time) is None                      # pinch beside the target
     assert n.state == "pending"
-    assert g.touch((n.x, n.y), n.hit_time + 0.02).points == GREAT             # on the beat -> PERFECT!
+    assert g.click((n.x, n.y), n.hit_time + 0.02).points == GREAT             # on the beat -> PERFECT!
     n = g.notes[1]
-    assert g.touch((n.x, n.y), n.hit_time - g.w_touch + 0.001).points == OK   # hand waiting early
+    assert g.click((n.x, n.y), n.hit_time - g.w_great + 0.001).points == OK   # a bit early -> GREAT!
     n = g.notes[2]
-    assert g.click((n.x, n.y), n.hit_time + g.w_good - 0.01).points == MEH      # late edge
+    assert g.click((n.x, n.y), n.hit_time + g.w_good - 0.01).points == MEH    # late edge -> GOOD!
     n = g.notes[3]
     assert [e.points for e in g.update(n.hit_time + g.w_good + 0.01)] == [MISS]
-    assert g.click((n.x, n.y), n.hit_time + g.w_good + 0.02) is None or n.state == "missed"
+    assert n.state == "missed" and not hasattr(g, "touch")                    # no hover/touch path exists
     from game import LABELS
     assert LABELS == {GREAT: "PERFECT!", OK: "GREAT!", MEH: "GOOD!", MISS: "MISS!"}
 

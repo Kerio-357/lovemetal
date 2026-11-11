@@ -1,7 +1,11 @@
 """Webcam capture + YOLOv8-pose hand tracking (best.pt) in a background thread.
 
-The game loop never blocks on the camera or the neural net: it calls `get_state()`
-and receives the newest result. Everything in the worker thread is wrapped so a bad
+Two threads keep input lag low:
+  * grabber  - reads the camera as fast as it delivers and keeps ONLY the newest frame;
+  * tracker  - runs YOLO on that newest frame. If the model is slower than the camera,
+               the frames in between are skipped (frame skipping) instead of queueing
+               up, so the cursor never falls behind real time.
+The game loop never blocks on either: it calls `get_state()` and receives the newest result. Everything in the worker thread is wrapped so a bad
 frame, a failed inference or a camera hiccup degrades to "no hand this frame"
 instead of crashing the game.
 
@@ -44,6 +48,8 @@ class HandState:
     frame_id: int = -1
     frame: np.ndarray | None = None                # screen-sized RGB webcam picture (tinted)
     infer_ms: float = 0.0                          # smoothed model latency
+    track_fps: float = 0.0                         # hand-tracking updates per second
+    dropped: int = 0                               # camera frames skipped because the model was busy
 
 
 def _np(x) -> np.ndarray:
@@ -64,6 +70,10 @@ class HandTracker:
         self._running = False
         self._frame_id = 0
         self._ready = threading.Event()
+        self._grabber: threading.Thread | None = None
+        self._frame_cond = threading.Condition()
+        self._latest: tuple | None = None      # (frame_bgr, capture_time, sequence_number)
+        self._cam_lost = False
         self._init_error: Exception | None = None
 
     # -- lifecycle -------------------------------------------------------
@@ -75,8 +85,10 @@ class HandTracker:
                                     f"Put best.pt next to main.py or pass --weights PATH.")
         self._open_camera()
         self._running = True
+        self._grabber = threading.Thread(target=self._grab_loop, name="camera-grabber", daemon=True)
         self._thread = threading.Thread(target=self._worker, args=(weights,),
                                         name="hand-tracker", daemon=True)
+        self._grabber.start()
         self._thread.start()
         # Model is loaded inside the worker thread (same thread that runs inference).
         if not self._ready.wait(timeout=180):
@@ -89,8 +101,11 @@ class HandTracker:
 
     def stop(self) -> None:
         self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+        for th in (self._thread, self._grabber):
+            if th and th.is_alive():
+                th.join(timeout=2.0)
         if self._cap is not None:
             self._cap.release()
 
@@ -135,8 +150,10 @@ class HandTracker:
 
     def _predict(self, model, frame_bgr: np.ndarray):
         c = self.cfg
+        # imgsz: YOLO letterboxes the frame down to this size internally (320 by default),
+        # so inference cost does not depend on the camera or screen resolution.
         return model.predict(frame_bgr, imgsz=c.yolo_imgsz, conf=c.yolo_conf, max_det=1,
-                             device=c.yolo_device, verbose=False)[0]
+                             device=c.yolo_device, half=c.yolo_half, verbose=False)[0]
 
     def _extract(self, res):
         """Ultralytics result -> (kpts_xy_norm (21,2) ndarray, box_xyxy_norm) or None."""
@@ -210,6 +227,32 @@ class HandTracker:
         with self._lock:
             self._state = state
 
+    def _grab_loop(self) -> None:
+        """Camera thread: always hold the newest frame, drop everything older."""
+        fails, last_reopen, seq = 0, 0.0, 0
+        while self._running:
+            try:
+                ok, frame = self._cap.read()
+            except Exception:  # noqa: BLE001
+                ok, frame = False, None
+            if ok and frame is not None:
+                fails, self._cam_lost = 0, False
+                seq += 1
+                with self._frame_cond:
+                    self._latest = (frame, time.perf_counter(), seq)   # capture time stamps the pinch
+                    self._frame_cond.notify()
+                continue
+            fails += 1
+            time.sleep(0.01)
+            if fails >= 30:                           # ~0.3 s of nothing: camera is gone
+                self._cam_lost = True
+                if time.perf_counter() - last_reopen > 1.0:
+                    last_reopen = time.perf_counter()
+                    try:
+                        self._open_camera()
+                    except Exception:  # noqa: BLE001
+                        pass
+
     def _worker(self, weights: Path) -> None:
         try:
             model = self._load_model(weights)
@@ -220,29 +263,28 @@ class HandTracker:
         self._ready.set()
 
         cfg = self.cfg
-        read_fails, last_reopen, infer_ms = 0, 0.0, 0.0
+        infer_ms, last_seq, dropped = 0.0, 0, 0
+        fps, last_done = 0.0, None
         while self._running:
-            try:
-                ok, frame = self._cap.read()
-            except Exception:  # noqa: BLE001
-                ok, frame = False, None
-            if not ok or frame is None:
-                read_fails += 1
-                time.sleep(0.01)
-                if read_fails >= 30:                  # ~0.3 s of nothing: camera is gone
+            # Wait for a frame newer than the one processed last time.
+            with self._frame_cond:
+                self._frame_cond.wait_for(
+                    lambda: not self._running or (self._latest is not None and self._latest[2] != last_seq),
+                    timeout=0.25)
+                latest = self._latest
+            if not self._running:
+                break
+            if latest is None or latest[2] == last_seq:
+                if self._cam_lost:                    # no picture: report "no hand", keep the game alive
                     self.error = "Camera disconnected - retrying..."
                     self._frame_id += 1
                     self._publish(HandState(False, t=time.perf_counter(), frame_id=self._frame_id,
-                                            infer_ms=infer_ms))
-                    if time.perf_counter() - last_reopen > 1.0:
-                        last_reopen = time.perf_counter()
-                        try:
-                            self._open_camera()
-                        except Exception:  # noqa: BLE001
-                            pass
+                                            infer_ms=infer_ms, dropped=dropped))
                 continue
-            read_fails = 0
-            t = time.perf_counter()                   # capture time: used to timestamp clicks
+            frame, t, seq = latest
+            if last_seq:
+                dropped += seq - last_seq - 1         # frames that arrived while the model was busy
+            last_seq = seq
             self._frame_id += 1
 
             bg = None
@@ -252,7 +294,8 @@ class HandTracker:
                 except Exception:  # noqa: BLE001 - background is cosmetic, never fatal
                     bg = None
 
-            state = HandState(False, t=t, frame_id=self._frame_id, frame=bg, infer_ms=infer_ms)
+            state = HandState(False, t=t, frame_id=self._frame_id, frame=bg, infer_ms=infer_ms,
+                              track_fps=fps, dropped=dropped)
             try:
                 t0 = time.perf_counter()
                 res = self._predict(model, frame)     # raw (un-mirrored) frame: matches training data
@@ -271,12 +314,17 @@ class HandTracker:
                     if bg is not None and cfg.draw_hand_skeleton:
                         self._draw_skeleton(bg, kpts, w, h, ratio)
                     state = HandState(True, self.normalize_to_screen(nx, ny, w, h), ratio, t,
-                                      self._frame_id, bg, infer_ms)
+                                      self._frame_id, bg, infer_ms, fps, dropped)
                 else:
                     state.infer_ms = infer_ms
             except Exception as e:  # noqa: BLE001 - never let one bad frame kill tracking
                 self.error = f"Tracking error: {type(e).__name__}: {e}"[:120]
                 time.sleep(0.02)
+            done = time.perf_counter()
+            if last_done is not None and done > last_done:
+                inst = 1.0 / (done - last_done)
+                fps = inst if fps == 0.0 else 0.9 * fps + 0.1 * inst
+            last_done = done
             self._publish(state)
 
     def _draw_skeleton(self, bg: np.ndarray, kpts: np.ndarray, w: int, h: int, ratio: float) -> None:

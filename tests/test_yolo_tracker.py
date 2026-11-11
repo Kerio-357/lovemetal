@@ -148,6 +148,21 @@ def test_no_hand_and_errors_do_not_crash_and_cursor_stays():
         tr.stop()
 
 
+def test_slow_model_skips_stale_frames():
+    """Model slower than the camera: old frames are dropped, results stay fresh."""
+    install_fake()
+    def slow(): time.sleep(0.05); return make_result(hand(False))        # 50 ms model, 5 ms camera
+    FakeModel.behaviour = staticmethod(slow)
+    tr = make_tracker().start()
+    try:
+        assert wait_for(lambda: tr.get_state().dropped > 10, timeout=4.0)
+        s = tr.get_state()
+        assert time.perf_counter() - s.t < 0.15                           # newest result is recent, no backlog
+        assert 8 < s.track_fps < 25, s.track_fps
+    finally:
+        tr.stop(); FakeModel.behaviour = staticmethod(lambda: make_result(hand(False)))
+
+
 def test_startup_failures_are_clear():
     install_fake()
     cfg = dataclasses.replace(CFG, weights=str(ROOT / "nope.pt"))

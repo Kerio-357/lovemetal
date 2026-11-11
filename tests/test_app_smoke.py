@@ -42,7 +42,7 @@ def test_full_flow_mouse_mode():
     def build(pg, mouse, main):
         import render
         orig_menu, orig_res, orig_notes = render.Renderer.draw_menu, render.Renderer.draw_results, render.Renderer.draw_notes
-        def menu(self, tracks, sel, pn, pb, cur, hm="pinch", music=""): log.setdefault("menu", []).append((sel, pn, hm, music)); return orig_menu(self, tracks, sel, pn, pb, cur, hm, music)
+        def menu(self, tracks, sel, pn, pb, cur, name="", sub=""): log.setdefault("menu", []).append((sel, pn, name, sub)); return orig_menu(self, tracks, sel, pn, pb, cur, name, sub)
         def res(self, core, cur): log["results"] = (core.score, dict(core.counts), core.track.title); return orig_res(self, core, cur)
         def notes(self, core, now):
             log["played"] = True
@@ -77,7 +77,7 @@ def test_full_flow_mouse_mode():
     paces = [m[1] for m in log["menu"]]
     assert paces[0] == "NORMAL" and "FAST" in paces and paces[-1] == "SLOW", set(paces)
     assert log["music"] == "bury_me_deep_inside.mp3"
-    assert log["menu"][0][3].startswith("MUSIC: ")
+    assert log["menu"][0][2].endswith("(AUTO)") and log["menu"][0][3]
     assert log.get("played") and "results" in log, log.keys()
     score, counts, title = log["results"]
     assert title == "Bury Me Deep Inside" and score > 0 and counts[0] == 0, log["results"]
@@ -97,30 +97,58 @@ def test_full_flow_mouse_mode():
     print("   results:", log["results"])
 
 
-def test_touch_mode_and_miss_popups():
-    """--hit-mode touch: hovering the target on the beat hits it without any click;
-    notes that are skipped give MISS! pop-ups and no sound."""
-    log = {"popups": []}
+def test_hover_alone_never_hits():
+    """Cursor resting on every note exactly on the beat, but no pinch -> only MISS!.
+    Same with the fingers held together the whole time (a held pinch is not a new pinch)."""
+    for held in (False, True):
+        log = {"popups": []}
+        def build(pg, mouse, main):
+            import render
+            orig_notes = render.Renderer.draw_notes
+            def notes(self, core, now):
+                vis = core.visible_notes(now)
+                if vis: mouse["pos"] = (vis[0].x, vis[0].y)        # always on the target
+                return orig_notes(self, core, now)
+            render.Renderer.draw_notes = notes
+            def hold():
+                mouse["down"] = held; return []
+            return [hold] * 30 + [[ev(pg, pg.K_RETURN)]] + [[]] * 4200
+        def patch(main):
+            o = main.show_score_popup
+            def pop(text, x, y): log["popups"].append(text); return o(text, x, y)
+            main.show_score_popup = pop
+        pg, main = run(build, ["--mouse"], patch)
+        assert len(log["popups"]) >= 3 and set(log["popups"]) == {"MISS!"}, (held, log["popups"])
+        assert pg.mixer.Sound.return_value.play.call_count == 0     # no hit-clap, drums never unmuted
+
+
+def test_frame_skip_and_live_pinch_keys():
+    """Slow drawing -> every second frame is skipped while logic keeps running each loop."""
+    log = {"draws": 0, "loops": 0, "thresh": []}
     def build(pg, mouse, main):
+        import render, input_pipeline
+        orig_begin = render.Renderer.begin
+        def begin(self, state, cam=True):
+            log["draws"] += 1; time.sleep(0.03); return orig_begin(self, state, cam)   # 30 ms per draw
+        render.Renderer.begin = begin
+        orig_set = input_pipeline.PinchClickDetector.set_sensitivity
+        def sset(self, v): orig_set(self, v); log["thresh"].append(round(self.close_thresh, 2))
+        input_pipeline.PinchClickDetector.set_sensitivity = sset
+        def count():
+            log["loops"] += 1; return []
+        return [[ev(pg, pg.K_RIGHTBRACKET)], [ev(pg, pg.K_LEFTBRACKET)], [ev(pg, pg.K_LEFTBRACKET)], [ev(pg, pg.K_p)]] + [count] * 60
+    run(build, ["--mouse"])
+    assert log["thresh"] == [0.30, 0.28, 0.26]
+    assert log["draws"] < 0.7 * (log["loops"] + 4), log                 # about half of the frames drawn
+    log2 = {"draws": 0}
+    def build2(pg, mouse, main):
         import render
-        orig_notes = render.Renderer.draw_notes
-        def notes(self, core, now):
-            vis = core.visible_notes(now)
-            if vis and vis[0].index == 0:                      # only chase the first note ...
-                on_beat = core.song_time(now) >= vis[0].hit_time
-                mouse["pos"] = (vis[0].x, vis[0].y) if on_beat else (5, 5)
-            else:
-                mouse["pos"] = (5, 5)                          # ... and skip the rest
-            return orig_notes(self, core, now)
-        render.Renderer.draw_notes = notes
-        return [[]] * 3 + [[ev(pg, pg.K_RETURN)]] + [[]] * 4200
-    def patch(main):
-        o = main.show_score_popup
-        def pop(text, x, y): log["popups"].append(text); return o(text, x, y)
-        main.show_score_popup = pop
-    pg, main = run(build, ["--mouse", "--hit-mode", "touch"], patch)
-    assert log["popups"][0] == "PERFECT!" and set(log["popups"][1:]) == {"MISS!"}, log["popups"]
-    assert pg.mixer.Sound.return_value.play.call_count == 1
+        orig_begin = render.Renderer.begin
+        def begin(self, state, cam=True): log2["draws"] += 1; time.sleep(0.03); return orig_begin(self, state, cam)
+        render.Renderer.begin = begin
+        return [[]] * 30
+    run(build2, ["--mouse", "--no-frame-skip"])
+    assert log2["draws"] >= 30, log2
 
 
 def make_engine(tmp_stems=None, **cfg_over):

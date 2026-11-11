@@ -35,10 +35,15 @@ class KalmanFilter2D:
     Tuning: raise `process_noise` for snappier, raise `meas_noise` for smoother.
     """
 
-    def __init__(self, process_noise: float = 400.0, meas_noise: float = 25.0):
+    def __init__(self, process_noise: float = 1.0e6, meas_noise: float = 25.0):
         self.q = process_noise
         self.r = meas_noise
         self.reset()
+
+    @property
+    def velocity(self) -> tuple[float, float]:
+        """Current velocity estimate in px/s (used to extrapolate between camera frames)."""
+        return (0.0, 0.0) if self.x is None else (float(self.x[2]), float(self.x[3]))
 
     def reset(self) -> None:
         self.x: np.ndarray | None = None      # state

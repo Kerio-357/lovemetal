@@ -21,6 +21,11 @@ ADAPTIVE AUDIO (class AdaptiveAudio below): the music reacts to how you play.
     a hit restores full volume, a miss cuts it to silence for a moment.
   Create stems with  python tools/make_stems.py  (already done for the three songs).
 
+INPUT: the only way to hit a note is a PINCH (thumb tip + index tip together).
+  HIT = cursor inside the note's hit radius + pinch + inside the note's beat window.
+  Hovering does nothing. Sensitivity: pinch_close_thresh in config.py, --pinch, or the
+  [ and ] keys while the game runs (P shows the pinch meter).
+
 RHYTHM: notes come from game.note_times() - one note every N beats of the selected
 track's BPM grid - and can only be hit inside their timing window (GameCore.click).
 Every judged note goes through on_judgement(), which calls the three feedback
@@ -77,8 +82,10 @@ def parse_args():
                    help="seconds a note is visible before its beat (bigger = easier)")
     p.add_argument("--audio-offset", type=float, default=None,
                    help="shift notes against the music, seconds (+ = later)")
-    p.add_argument("--hit-mode", choices=["pinch", "touch"], default=None,
-                   help="pinch = click on the target, touch = just move the hand onto it")
+    p.add_argument("--pinch", type=float, default=None, metavar="RATIO",
+                   help="pinch sensitivity: close threshold of the pinch ratio (default 0.28; "
+                        "higher = easier to trigger, lower = fewer accidental pinches)")
+    p.add_argument("--no-frame-skip", action="store_true", help="always draw every frame")
     p.add_argument("--music", choices=list(MUSIC_MODES), default=None,
                    help="adaptive audio: stems (drums follow your hits), duck, off, auto")
     p.add_argument("--full-song", action="store_true", help="play the whole track")
@@ -91,11 +98,15 @@ def build_config(args):
     mapping = {"weights": "weights", "device": "yolo_device", "imgsz": "yolo_imgsz",
                "conf": "yolo_conf", "anchor": "cursor_anchor", "camera": "camera_index",
                "smoother": "smoother", "approach": "approach_time",
-               "audio_offset": "audio_offset_s", "seed": "rng_seed", "hit_mode": "hit_mode", "music": "adaptive_audio"}
+               "audio_offset": "audio_offset_s", "seed": "rng_seed", "music": "adaptive_audio", "pinch": "pinch_close_thresh"}
     over = {cfg_key: getattr(args, arg) for arg, cfg_key in mapping.items()
             if getattr(args, arg) is not None}
     if args.full_song:
         over["max_song_seconds"] = None
+    if args.pinch is not None:                 # keep the re-open threshold 1.5x above
+        over["pinch_open_thresh"] = args.pinch * 1.5
+    if args.no_frame_skip:
+        over["frame_skip"] = False
     return dataclasses.replace(CFG, **over)
 
 
@@ -285,13 +296,13 @@ class AdaptiveAudio:
             pass
 
 
-def music_label(audio: AdaptiveAudio, track, wanted: str) -> str:
-    """Menu text: which adaptive-audio mode the selected track will use."""
+def music_label(audio: AdaptiveAudio, track, wanted: str) -> tuple[str, str]:
+    """Menu button text: which adaptive-audio mode the selected track will use."""
     mode = audio.resolve_mode(track, wanted) if audio.ok else "off"
-    text = {"stems": "STEMS - drums play only while you hit on time",
-            "duck": "DUCK - volume drops when you miss" + ("" if wanted != "stems" else " (no stems found)"),
-            "off": "OFF - plain playback"}[mode]
-    return f"MUSIC: {text}   [M]"
+    sub = {"stems": "drums play only while you hit",
+           "duck": "volume drops when you miss" if wanted != "stems" else "no stems found - ducking",
+           "off": "plain playback"}[mode]
+    return mode.upper() + (" (AUTO)" if wanted == "auto" else ""), sub
 
 
 # ----------------------------------------------------------------------------- hit feedback
@@ -359,8 +370,8 @@ def main() -> None:
     args = parse_args()
     cfg = build_config(args)
 
-    # Ask for a small audio buffer BEFORE pygame.init() so the hit sound has no audible lag.
-    pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+    # Ask for a small audio buffer BEFORE pygame.init() so sounds follow a pinch without lag.
+    pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=cfg.audio_buffer)
     pygame.init()
     audio_ok = init_audio()
     icon = make_window_icon()                      # assets/heartagram.png as the window / taskbar icon
@@ -379,20 +390,22 @@ def main() -> None:
         dataclasses.replace(cfg, smoother="ema", ema_alpha=1.0) if using_mouse else cfg)
     core = GameCore(cfg)
     renderer = Renderer(screen, cfg)
-    _fx["renderer"] = renderer
-    _fx["hit_sound"] = load_hit_sound(cfg, audio_ok)      # assets/hit.wav
     audio = AdaptiveAudio(cfg, audio_ok)                  # stems / ducking music engine
-    _fx["audio"], _fx["core"] = audio, core
+    _fx.update(renderer=renderer, hit_sound=load_hit_sound(cfg, audio_ok), audio=audio, core=core)
 
     mode = "menu"                          # menu | play | results
     selected = 0                           # index into TRACKS
     pace = min(max(cfg.default_pace, 0), len(PACES) - 1)   # index into PACES
-    hit_mode = cfg.hit_mode                # "pinch" or "touch" (menu button / H key)
-    music_mode = cfg.adaptive_audio        # auto | stems | duck | off (M key)
-    last_frame = time.perf_counter()
+    music_mode = cfg.adaptive_audio        # auto | stems | duck | off (menu button / M key)
     show_camera = cfg.camera_background
+    show_meter = False                     # pinch meter during play (P key); always on in the menu
     audio_note = None                      # warning if the song could not be played
     music_faded = False
+    last_frame = time.perf_counter()
+
+    # Frame skipping state: smoothed cost of drawing one frame, in milliseconds.
+    frame_budget_ms = 1000.0 / cfg.fps
+    draw_ms, skipping, frame_index = 0.0, False, 0
 
     def start_game() -> str:
         nonlocal audio_note, music_faded
@@ -412,26 +425,34 @@ def main() -> None:
         renderer.clear_effects()
         return "menu"
 
+    def next_music_mode() -> str:
+        return MUSIC_MODES[(MUSIC_MODES.index(music_mode) + 1) % len(MUSIC_MODES)]
+
     try:
         running = True
         while running:
             now = time.perf_counter()
             dt, last_frame = now - last_frame, now
 
-            # ---- input: hand / mouse cursor --------------------------------
+            # ================= 1. INPUT HANDLER: hand cursor + pinch =================
+            # tracker.get_state() never blocks: it returns the newest YOLO result.
+            # controller.update() smooths the cursor and turns the thumb-index distance
+            # into a pinch event. cur.click_time is set only in the frame where the
+            # fingers CLOSE (one event per pinch) and holds the capture time of the camera
+            # frame that showed it, so camera/model latency does not count against timing.
             state = tracker.get_state()
             cur = controller.update(state, now)
-            click_pos, click_t = None, None
-            if cur.click_time is not None:               # pinch (or left button in --mouse mode)
-                click_pos, click_t = cur.pos, cur.click_time
+            pinch_pos, pinch_t = None, None
+            if cur.click_time is not None:
+                pinch_pos, pinch_t = cur.pos, cur.click_time
+            menu_click = pinch_pos                        # menus accept a pinch or a mouse click
 
-            # ---- input: keyboard / window ----------------------------------
+            # ================= 2. KEYBOARD / WINDOW EVENTS ==========================
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     running = False
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not using_mouse:
-                    if mode != "play":                   # the mouse always works in the menus
-                        click_pos, click_t = e.pos, now
+                    menu_click = e.pos                    # mouse works in menus only, never on notes
                 elif e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_ESCAPE:
                         if mode == "menu":
@@ -440,12 +461,14 @@ def main() -> None:
                             mode = to_menu()
                     elif e.key == pygame.K_c:
                         show_camera = not show_camera
-                    elif e.key == pygame.K_h and mode == "menu":
-                        hit_mode = "touch" if hit_mode == "pinch" else "pinch"
-                    elif e.key == pygame.K_m and mode == "menu":
-                        music_mode = MUSIC_MODES[(MUSIC_MODES.index(music_mode) + 1) % len(MUSIC_MODES)]
-                    elif e.key == pygame.K_SPACE and cur.visible:
-                        click_pos, click_t = cur.pos, now    # keyboard "pinch" at the cursor
+                    elif e.key == pygame.K_p:
+                        show_meter = not show_meter
+                    elif e.key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET):
+                        # PINCH SENSITIVITY, live: [ = stricter (fewer accidental pinches),
+                        # ] = looser (pinch registers more easily). Copy the value you like
+                        # into pinch_close_thresh in config.py to keep it.
+                        step = -0.02 if e.key == pygame.K_LEFTBRACKET else 0.02
+                        controller.gesture.set_sensitivity(controller.gesture.close_thresh + step)
                     elif mode == "menu":
                         if e.key in (pygame.K_UP, pygame.K_w):
                             selected = (selected - 1) % len(TRACKS)
@@ -454,48 +477,45 @@ def main() -> None:
                         elif e.key in (pygame.K_TAB, pygame.K_LEFT, pygame.K_RIGHT):
                             step = -1 if e.key == pygame.K_LEFT else 1
                             pace = (pace + step) % len(PACES)
+                        elif e.key == pygame.K_m:
+                            music_mode = next_music_mode()
                         elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                             mode = start_game()
                     elif mode == "results" and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         mode = to_menu()
 
-            # ---- update + draw ---------------------------------------------
-            renderer.begin(state, show_camera)           # full-screen webcam background
-
+            # ================= 3. GAME LOGIC + AUDIO (before any drawing) ============
+            # Everything that makes sound runs here, right after the input was read, so
+            # the delay between a pinch and its audio is not extended by rendering.
             if mode == "menu":
-                if click_pos is not None:
+                if menu_click is not None:
                     for i, rect in enumerate(renderer.track_rects[:len(TRACKS)]):
-                        if rect.collidepoint(click_pos):
+                        if rect.collidepoint(menu_click):
                             selected = i                 # choose a song
-                    if renderer.btn_pace.collidepoint(click_pos):
+                    if renderer.btn_pace.collidepoint(menu_click):
                         pace = (pace + 1) % len(PACES)
-                    elif renderer.btn_mode.collidepoint(click_pos):
-                        hit_mode = "touch" if hit_mode == "pinch" else "pinch"
-                    elif renderer.btn_start.collidepoint(click_pos):
+                    elif renderer.btn_mode.collidepoint(menu_click):
+                        music_mode = next_music_mode()
+                    elif renderer.btn_start.collidepoint(menu_click):
                         mode = start_game()              # launch the game loop
-                if mode == "menu":
-                    renderer.draw_menu(TRACKS, selected, PACES[pace][0], PACES[pace][1], cur, hit_mode,
-                                       music_label(audio, TRACKS[selected], music_mode))
 
             elif mode == "play":
-                # 1) Hit attempts. A hit registers only if the cursor is on the earliest
-                #    pending note AND the moment lies inside that note's rhythm window.
-                ev = None
-                if click_pos is not None:                # pinch / SPACE / mouse button
-                    renderer.add_click_ring(click_pos, now)
-                    ev = core.click(click_pos, click_t)  # judged at the moment of the pinch
-                if ev is None and hit_mode == "touch" and cur.tracking:
-                    ev = core.touch(cur.pos, now)        # hand simply touching the target
-                if ev is not None:
-                    on_judgement(ev)                     # sound + particles + pop-up
-                # 2) Notes whose window passed without a hit -> "MISS!" pop-up.
+                # TARGET HIT CONDITION - all three must hold:
+                #   [pinch gesture]            pinch_pos is set only when the fingers just closed
+                #   [cursor inside the note]   checked in core.click() against the hit radius
+                #   [valid beat window]        checked in core.click() against pinch_t
+                # -> on_judgement(): hit-clap + drum stem unmuted + particles + score pop-up.
+                # A hand merely resting on a note never reaches core.click().
+                if pinch_pos is not None:
+                    renderer.add_click_ring(pinch_pos, now)
+                    ev = core.click(pinch_pos, pinch_t)
+                    if ev is not None:
+                        on_judgement(ev)
+                # Notes whose window passed without a pinch -> MISS, drums fall silent.
                 for miss in core.update(now):
                     on_judgement(miss)
-                # 3) Adaptive audio: fade the drum stem (or the song volume) towards
-                #    "alive" after hits and towards silence after misses.
+                # Adaptive audio: fade the drum stem (or song volume) towards its target.
                 audio.update(core.song_time(now), dt)
-                renderer.draw_notes(core, now)
-                renderer.draw_hud(core, now, beat=(audio.mode, audio.beat_alive))
                 if core.finished:
                     if not music_faded:
                         audio.stop(fade_ms=1500)
@@ -504,23 +524,46 @@ def main() -> None:
                         mode = "results"
 
             elif mode == "results":
-                renderer.draw_results(core, cur)
-                if click_pos is not None and renderer.btn_return.collidepoint(click_pos):
+                if menu_click is not None and renderer.btn_return.collidepoint(menu_click):
                     mode = to_menu()
 
-            renderer.draw_effects(now)
-            renderer.draw_cursor(cur)
+            # ================= 4. DRAW (with optional frame skipping) ================
+            # If drawing alone costs more than one frame budget, draw every second frame
+            # only. Steps 1-3 still run every loop, so input and audio stay responsive.
+            frame_index += 1
+            if cfg.frame_skip:
+                skipping = draw_ms > frame_budget_ms if not skipping else draw_ms > 0.8 * frame_budget_ms
+            if not (skipping and frame_index % 2):
+                t_draw = time.perf_counter()
+                renderer.begin(state, show_camera)       # full-screen webcam background
+                if mode == "menu":
+                    name, sub = music_label(audio, TRACKS[selected], music_mode)
+                    renderer.draw_menu(TRACKS, selected, PACES[pace][0], PACES[pace][1], cur, name, sub)
+                elif mode == "play":
+                    renderer.draw_notes(core, now)
+                    renderer.draw_hud(core, now, beat=(audio.mode, audio.beat_alive))
+                else:
+                    renderer.draw_results(core, cur)
+                renderer.draw_effects(now)
+                renderer.draw_cursor(cur)
+                if not using_mouse and (show_meter or mode == "menu"):
+                    renderer.draw_pinch_meter(cur, controller.gesture.close_thresh,
+                                              controller.gesture.open_thresh)
 
-            # Status line: tracker problems > audio problems > startup note > "show your hand"
-            msg = getattr(tracker, "error", None) or (audio_note if mode == "play" else None) \
-                or startup_note
-            if msg:
-                renderer.draw_status(msg)
-            elif not using_mouse and not cur.tracking:
-                renderer.draw_status("No hand detected - show your hand to the camera", warn=False)
-            renderer.draw_fps(clock.get_fps(), state.infer_ms)
-            pygame.display.flip()
-            clock.tick(cfg.fps)
+                # Status line: tracker problems > audio problems > startup note > "show your hand"
+                msg = getattr(tracker, "error", None) or (audio_note if mode == "play" else None) \
+                    or startup_note
+                if msg:
+                    renderer.draw_status(msg)
+                elif not using_mouse and not cur.tracking:
+                    renderer.draw_status("No hand detected - show your hand to the camera", warn=False)
+                renderer.draw_fps(clock.get_fps(), state.infer_ms, state.track_fps, skipping)
+                cost = (time.perf_counter() - t_draw) * 1000.0
+                draw_ms = cost if draw_ms == 0.0 else 0.9 * draw_ms + 0.1 * cost
+                pygame.display.flip()
+
+            # ================= 5. FRAME CAP =========================================
+            clock.tick(cfg.fps)                          # 60 fps cap
     finally:
         audio.stop()
         tracker.stop()

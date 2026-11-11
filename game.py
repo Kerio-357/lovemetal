@@ -78,7 +78,7 @@ class GameCore:
         self.track: Track | None = None
         self.notes: list[Note] = []
         self.t0: float | None = None
-        self.w_perfect = self.w_great = self.w_good = self.w_touch = 0.0   # set in start()
+        self.w_perfect = self.w_great = self.w_good = 0.0   # set in start()
         self._reset_stats()
 
     def _reset_stats(self) -> None:
@@ -100,7 +100,6 @@ class GameCore:
         self.w_perfect = self.cfg.window_beats_perfect * beat
         self.w_great = self.cfg.window_beats_great * beat
         self.w_good = self.cfg.window_beats_good * beat
-        self.w_touch = self.cfg.touch_window_beats * beat
         self.t0 = now
         self._reset_stats()
 
@@ -158,13 +157,10 @@ class GameCore:
             out.append(n)
         return out
 
-    def touch(self, pos: tuple[float, float], now: float) -> HitEvent | None:
-        """Touch mode: the hand being on the target inside its window counts as a hit."""
-        return self.click(pos, now, early_limit=self.w_touch)
+    def click(self, pos: tuple[float, float], now: float) -> HitEvent | None:
+        """Judge a pinch made at screen position `pos` at time `now`.
 
-    def click(self, pos: tuple[float, float], now: float,
-              early_limit: float | None = None) -> HitEvent | None:
-        """Judge a hit attempt at `pos`, made at time `now`.
+        HIT CONDITION = cursor inside the note's hit radius  AND  pinch  AND  valid beat window.
 
         A hit registers only inside the note's ACTIVE RHYTHM WINDOW
         (hit_time - w_good .. hit_time + w_good, in seconds = fractions of a beat) and only on the *earliest*
@@ -176,7 +172,7 @@ class GameCore:
             return None
         target = self.notes[self._next]
         dt = self.song_time(now) - target.hit_time
-        if dt < -(self.w_good if early_limit is None else early_limit):
+        if dt < -self.w_good:
             return None                             # too early: window not open yet
         if math.hypot(pos[0] - target.x, pos[1] - target.y) > c.note_radius * c.hit_forgiveness:
             return None                             # clicked beside the note: no penalty

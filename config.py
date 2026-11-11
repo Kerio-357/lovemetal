@@ -38,7 +38,12 @@ class Config:
     # --- Display ---------------------------------------------------------
     screen_w: int = 1280
     screen_h: int = 720
-    fps: int = 60
+    fps: int = 60                      # render cap, enforced with clock.tick(fps)
+    # Optional frame skipping: if drawing one frame takes longer than the frame budget
+    # (slow laptop), only every second frame is drawn. Input, judgement and audio still
+    # run every loop, so hits stay responsive; only the picture updates less often.
+    frame_skip: bool = True
+    audio_buffer: int = 512            # mixer buffer in samples (512 = ~12 ms; 256 = lower lag, may crackle)
 
     # --- Camera / tracking ----------------------------------------------
     camera_index: int = 0
@@ -62,7 +67,11 @@ class Config:
 
     # --- YOLOv8-pose model (best.pt) ------------------------------------
     weights: str = "best.pt"           # relative paths resolve next to main.py
-    yolo_imgsz: int = 416              # inference size (multiple of 32). 320 = faster, 640 = trained size
+    # PERFORMANCE: the camera picture is shown full-screen at its own resolution, but YOLO
+    # only sees a copy downscaled to yolo_imgsz. 320 is the fastest setting that still
+    # tracks a hand well on a laptop CPU; use 416 or 640 if keypoints look unstable.
+    yolo_imgsz: int = 320              # inference size (multiple of 32): 320 fast, 416, 640 = trained size
+    yolo_half: bool = False            # half-precision inference (only useful on a CUDA GPU)
     yolo_conf: float = 0.35            # min hand-box confidence
     yolo_device: str | None = None     # None = auto (CUDA if available), or "cpu", "cuda:0", "mps"
     kpt_conf: float = 0.30             # min confidence of the keypoints we rely on
@@ -73,15 +82,38 @@ class Config:
     # --- Smoothing -------------------------------------------------------
     smoother: str = "kalman"           # "ema" or "kalman"
     ema_alpha: float = 0.35            # 0..1, higher = more responsive, more jitter
-    kalman_process_noise: float = 400.0   # higher = trusts measurements more (snappier)
+    # Kalman process noise = expected hand acceleration^2 (px/s^2)^2. Higher = snappier,
+    # lower = smoother but the cursor trails behind fast moves. (The old value 400 lagged
+    # far behind a fast hand; 1e6 follows it while still reducing the jitter.)
+    kalman_process_noise: float = 1.0e6
     kalman_meas_noise: float = 25.0       # pixels^2; higher = smoother (more lag)
+    # Between camera frames the cursor is extrapolated along its current velocity, which
+    # hides camera + model latency and makes it move at 60 fps instead of camera fps.
+    cursor_predict_s: float = 0.08        # max look-ahead in seconds (0 = off)
+    cursor_predict_min_speed: float = 250.0   # px/s; below this the look-ahead fades out (no jitter at rest)
 
-    # --- Click gesture (thumb-index pinch) -----------------------------
-    # pinch_ratio = |thumb_tip - index_tip| / |wrist - middle_mcp|  (scale invariant)
-    pinch_close_thresh: float = 0.28   # below -> pinched (hysteresis lower bound)
-    pinch_open_thresh: float = 0.42    # above -> released (hysteresis upper bound)
-    pinch_min_frames: int = 2          # consecutive frames needed to confirm a change
-    click_cooldown_s: float = 0.12     # ignore re-clicks inside this window
+    # --- PINCH GESTURE = the only way to hit a note ---------------------------
+    # Measured from the YOLO keypoints every camera frame:
+    #     pinch_ratio = distance(thumb tip, index tip) / distance(wrist, middle knuckle)
+    # Dividing by the palm size makes it independent of how far the hand is from the
+    # camera. Open hand ~0.6-1.2, fingertips touching ~0.05-0.20.
+    #
+    # >>> SENSITIVITY - tune these while watching the pinch meter (bottom-left, key P):
+    #   pinch_close_thresh  the ratio must drop BELOW this to count as a pinch.
+    #       Pinches not registering      -> raise it (0.32 ... 0.40)
+    #       Accidental / phantom pinches -> lower it (0.20 ... 0.25)
+    #   pinch_open_thresh   the ratio must rise ABOVE this before the next pinch can
+    #       start (hysteresis). Keep it about 1.5x the close threshold; a bigger gap
+    #       means fewer double triggers but you must open the fingers wider.
+    # In the game the [ and ] keys change the close threshold live (open follows at 1.5x).
+    pinch_close_thresh: float = 0.28
+    pinch_open_thresh: float = 0.42
+    # A pinch is accepted on the FIRST frame if the ratio is clearly closed (below
+    # pinch_instant_ratio) - no added input lag. A borderline reading must persist for
+    # pinch_min_frames camera frames, which filters single-frame keypoint glitches.
+    pinch_instant_ratio: float = 0.20
+    pinch_min_frames: int = 2
+    click_cooldown_s: float = 0.12     # minimum time between two pinches
 
     # --- Rhythm / speed (THE KNOBS TO TURN IF IT FEELS TOO FAST OR SLOW) ----
     default_pace: int = 1              # index into PACES: 0 = SLOW, 1 = NORMAL, 2 = FAST
@@ -116,11 +148,7 @@ class Config:
     duck_level: float = 0.30           # "duck" mode: volume while you are not hitting (0..1)
     stumble_time: float = 0.40         # "duck" mode: seconds of silence after a miss
 
-    # --- Hit rule and hit feedback -----------------------------------------
-    # "pinch": the cursor must be on the target AND you pinch (click) inside its window.
-    # "touch": moving the hand onto the target inside its window is enough (easier).
-    hit_mode: str = "pinch"
-    touch_window_beats: float = 0.30   # touch mode: a note becomes touchable this many beats early
+    # --- Hit feedback ---------------------------------------------------------
     hit_volume: float = 0.7            # loudness of assets/hit.wav (0..1)
     popup_time: float = 0.5            # seconds the PERFECT! / GREAT! / MISS! text stays
     particle_count: int = 26           # sparks per hit

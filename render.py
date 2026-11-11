@@ -255,7 +255,7 @@ class Renderer:
 
     # -- main menu -------------------------------------------------------
     def draw_menu(self, tracks, selected: int, pace_name: str, pace_beats: int,
-                  cur: CursorState, hit_mode: str = "pinch", music: str = "") -> None:
+                  cur: CursorState, music_name: str = "", music_sub: str = "") -> None:
         scr = self.screen
         pulse = 0.5 + 0.5 * math.sin(time.perf_counter() * 1.6)      # slow "breathing" glow
         draw_logo(scr, (965, 215), 300, COLOR_PANEL, 255)
@@ -281,17 +281,13 @@ class Renderer:
             bpm = self.font_small.render(f"{track.bpm:.0f} BPM", True, COLOR_SILVER)
             scr.blit(bpm, (rect.right - bpm.get_width() - 18, rect.centery - 9))
 
-        if music:
-            self._text(music, self.font_small, COLOR_SILVER, (150, 556))
-
         self._button(self.btn_start, "START RITE", self._hover(self.btn_start, cur))
         self._button(self.btn_pace, f"PACE: {pace_name}", self._hover(self.btn_pace, cur),
                      sub=f"a note every {pace_beats} beat{'s' if pace_beats > 1 else ''}")
-        self._button(self.btn_mode, f"HIT: {hit_mode.upper()}", self._hover(self.btn_mode, cur),
-                     sub="pinch on the target" if hit_mode == "pinch" else "just touch the target")
+        self._button(self.btn_mode, f"MUSIC: {music_name}", self._hover(self.btn_mode, cur), sub=music_sub)
 
         self._text("Pinch thumb + index to click   |   UP/DOWN track   ENTER start   TAB pace"
-                   "   H hit mode   C camera   ESC quit", self.font_small, COLOR_SILVER,
+                   "   M music   P pinch meter   ESC quit", self.font_small, COLOR_SILVER,
                    (self.cfg.screen_w // 2, 692), center=True)
 
     # -- notes -----------------------------------------------------------
@@ -474,7 +470,29 @@ class Renderer:
         self._text(msg, self.font_body, (255, 170, 90) if warn else COLOR_SILVER,
                    (self.cfg.screen_w // 2, 655), center=True)
 
-    def draw_fps(self, fps: float, infer_ms: float = 0.0) -> None:
-        txt = f"{fps:.0f} fps" + (f" | model {infer_ms:.0f} ms" if infer_ms else "")
+    def draw_pinch_meter(self, cur: CursorState, close_thresh: float, open_thresh: float) -> None:
+        """Live pinch gauge for tuning the threshold: bar = how closed the fingers are,
+        red tick = close threshold (pinch fires when the bar passes it), grey tick = re-open."""
+        x0, y0, w, h, full = 20, self.cfg.screen_h - 64, 230, 12, 1.0
+        pygame.draw.rect(self.screen, COLOR_DARK, (x0, y0, w, h))
+        closed = 1 - _clamp01(cur.pinch_ratio / full) if cur.tracking else 0.0
+        if closed > 0:
+            pygame.draw.rect(self.screen, COLOR_BLOOD if cur.pinched else COLOR_SILVER,
+                             (x0, y0, int(w * closed), h))
+        pygame.draw.rect(self.screen, COLOR_SILVER, (x0, y0, w, h), 1)
+        for th, col in ((close_thresh, COLOR_BLOOD), (open_thresh, (120, 120, 130))):
+            tx = x0 + int(w * (1 - _clamp01(th / full)))
+            pygame.draw.line(self.screen, col, (tx, y0 - 4), (tx, y0 + h + 4), 2)
+        label = (f"pinch ratio {cur.pinch_ratio:.2f}" if cur.tracking else "no hand") + \
+            f"   threshold {close_thresh:.2f}  [ / ]"
+        self._text(label, self.font_small, COLOR_SILVER, (x0, y0 - 24))
+
+    def draw_fps(self, fps: float, infer_ms: float = 0.0, track_fps: float = 0.0,
+                 skipping: bool = False) -> None:
+        txt = f"{fps:.0f} fps"
+        if infer_ms:
+            txt += f" | tracking {track_fps:.0f}/s | model {infer_ms:.0f} ms"
+        if skipping:
+            txt += " | frame skip"
         s = self.font_small.render(txt, True, (150, 150, 160))
         self.screen.blit(s, (self.cfg.screen_w - s.get_width() - 14, self.cfg.screen_h - 26))
