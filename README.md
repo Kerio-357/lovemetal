@@ -1,131 +1,131 @@
 # Lovemetal 🜏
 
-Готическая ритм-игра в стиле osu!, в которую играют **рукой перед веб-камерой**: двигаешь руку — двигается курсор, соединяешь большой и указательный пальцы («щипок») — попадаешь по ноте. В игре три песни HIM.
+A gothic, osu!-style rhythm game you play **with your hand in front of a webcam**: move your hand to move the cursor, bring thumb and index finger together (a "pinch") to hit a note. Three songs by HIM are built in.
 
-Работает на Python, OpenCV, Ultralytics YOLOv8-pose (своя модель `best.pt`, 21 точка руки) и Pygame. Это учебный проект по компьютерному зрению.
+Built with Python, OpenCV, Ultralytics YOLOv8-pose (a custom `best.pt` model, 21 hand keypoints) and Pygame. This is an academic computer-vision project.
 
-## Что нужно
+## What you need
 
-- компьютер с Windows 10/11 (на macOS и Linux тоже запустится, команды ниже почти те же);
-- веб-камера (без неё можно играть мышкой, см. ниже);
-- установленный **Python 3.10, 3.11 или 3.12**;
-- около 3 ГБ свободного места: библиотеки для нейросети тяжёлые;
-- интернет только для установки.
+- a Windows 10/11 PC (macOS and Linux work too, the commands are almost the same);
+- a webcam (or play with the mouse, see below);
+- **Python 3.10, 3.11 or 3.12** installed;
+- about 3 GB of free disk space (the neural-network libraries are large);
+- internet access for the installation only.
 
-Никаких расширений и программ для кода (VS Code, PyCharm) ставить не нужно: хватит обычной командной строки.
+You do not need any code editor or extension (VS Code, PyCharm): the plain command line is enough.
 
-## Запуск за 5 шагов (Windows)
+## Quick start in 5 steps (Windows)
 
-**1. Скачай проект.** Открой страницу репозитория на GitHub, нажми зелёную кнопку **Code**, затем **Download ZIP**. Распакуй архив, например на рабочий стол. Файл `best.pt` (модель) уже внутри.
+**1. Download the project.** On the GitHub repository page click the green **Code** button, then **Download ZIP**. Unzip it, for example onto your desktop. The model file `best.pt` is already inside.
 
-**2. Установи Python.** Скачай его на [python.org/downloads](https://www.python.org/downloads/). В первом окне установщика **обязательно поставь галочку «Add python.exe to PATH»**, потом нажми Install Now.
+**2. Install Python.** Download it from [python.org/downloads](https://www.python.org/downloads/). On the first installer screen **tick "Add python.exe to PATH"**, then click Install Now.
 
-**3. Открой командную строку в папке проекта.** Зайди в распакованную папку, кликни в адресную строку проводника (где написан путь), сотри его, напиши `cmd` и нажми Enter.
+**3. Open a command line in the project folder.** Open the unzipped folder in File Explorer, click the address bar (where the path is shown), delete the path, type `cmd` and press Enter.
 
-**4. Установи библиотеки** (один раз, это займёт несколько минут):
+**4. Install the libraries** (once; it takes a few minutes):
 
     pip install -r requirements.txt
 
-**5. Запусти игру:**
+**5. Start the game:**
 
     python main.py
 
-Откроется меню. Если камера просит разрешение, разреши.
+The menu opens. If Windows asks for camera permission, allow it.
 
-## Играть без камеры
+## Play without a camera
 
-Нет камеры или хочешь просто посмотреть игру? Запусти так: курсор будет мышкой, а левая кнопка заменит щипок.
+No webcam, or you just want to try the game? Start it like this: the mouse moves the cursor and the left button acts as the pinch.
 
     python main.py --mouse
 
-## Как играть
+## How to play
 
-1. В меню выбери песню стрелками **↑ ↓** (или наведи курсор-руку), нажми **Enter** или сделай щипок по кнопке START.
-2. Поставь руку так, чтобы её было видно целиком, на расстоянии вытянутой руки, при хорошем свете.
-3. На экране появляются ноты со сжимающимся кольцом. Наведи курсор на ноту и **сделай щипок** (большой и указательный пальцы вместе) ровно в момент, когда кольцо совпадёт с нотой.
-4. Чем точнее удар, тем выше оценка: PERFECT, GREAT, GOOD. Промах — MISS.
-5. Если есть барабанная дорожка, ударные в музыке звучат только пока ты попадаешь в такт.
+1. In the menu pick a song with the **Up / Down** arrows (or point the hand cursor at it) and press **Enter**, or pinch the START button.
+2. Place your hand so the whole hand is visible, about an arm's length from the camera, in good light.
+3. Notes appear with a shrinking ring. Move the cursor onto a note and **pinch** (thumb and index finger together) exactly when the ring meets the note.
+4. The more precise the hit, the better the grade: PERFECT, GREAT, GOOD. A miss is MISS.
+5. If the song has a drum track, the drums in the music are audible only while you keep hitting on the beat.
 
-Клавиши: **↑ ↓** песня, **Tab** скорость нот, **M** режим музыки, **Enter** старт, **C** камера на фоне вкл/выкл, **P** индикатор щипка, **[** и **]** чувствительность щипка, **Esc** меню или выход.
+Keys: **Up / Down** song, **Tab** note speed, **M** music mode, **Enter** start, **C** camera background on/off, **P** pinch meter, **[** and **]** pinch sensitivity, **Esc** menu or quit.
 
-## Как добавить песни
+## How to add the songs
 
-Файлы песен нельзя выкладывать в открытый репозиторий (авторские права), поэтому mp3 в проекте нет. Игра запустится и без них, но будет беззвучной. Чтобы появился звук, нужны **твои собственные** mp3-файлы (купленные, из своей коллекции).
+Song files cannot be published in an open repository (copyright), so the mp3 files are not included. The game runs without them but is silent. To get sound you need **your own** mp3 files (bought or from your own collection).
 
-### Три песни HIM, которые уже есть в меню
+### The three HIM songs already in the menu
 
-1. Открой папку проекта и зайди в подпапку **`songs`** (рядом с `main.py`; если её нет, создай).
-2. Положи туда три файла и **назови их точно так**:
+1. Open the project folder and go into the **`songs`** subfolder (next to `main.py`; create it if it is missing).
+2. Put three files there and **name them exactly like this**:
 
-| Песня | Имя файла |
+| Song | File name |
 |---|---|
 | The Funeral of Hearts | `funeral_of_hearts.mp3` |
 | Join Me in Death | `join_me_in_death.mp3` |
 | Bury Me Deep Inside | `bury_me_deep_inside.mp3` |
 
-3. Запусти игру заново (`python main.py`). В меню выбери песню: музыка пойдёт сама, ноты ложатся на ритм.
+3. Start the game again (`python main.py`). Pick a song in the menu: the music plays and the notes follow the beat.
 
-**Частая ошибка.** Windows по умолчанию прячет расширения файлов. Если ты переименуешь `song.mp3` в `funeral_of_hearts.mp3`, а на деле файл называется `funeral_of_hearts.mp3.mp3`, игра его не найдёт. Включи показ расширений: в проводнике вкладка **Вид** → **Показать** → **Расширения имён файлов**.
+**Common mistake.** Windows hides file extensions by default. If you rename `song.mp3` to `funeral_of_hearts.mp3` but the file is really called `funeral_of_hearts.mp3.mp3`, the game will not find it. Turn extensions on: in File Explorer open **View** → **Show** → **File name extensions**.
 
-Версия песни должна быть той же, что у нас: темп и начало бита уже подобраны под конкретные записи (для Join Me in Death это Razorblade Mix). Если у тебя другая версия, ноты съедут. Тогда либо подбери сдвиг (`python main.py --audio-offset 0.05`, значение можно менять), либо подстрой настройки трека, как описано ниже.
+The recording must be the same version as ours: the tempo and the first beat are tuned to specific recordings (for Join Me in Death it is the Razorblade Mix). With another version the notes drift out of time. Then either shift the timing (`python main.py --audio-offset 0.05`, change the value as needed) or adjust the track settings as described below.
 
-### Своя песня вместо одной из трёх
+### Your own song instead of one of the three
 
-В меню сейчас три места, поэтому новая песня **заменяет** одну из существующих.
+The menu has three slots, so a new song **replaces** one of the existing ones.
 
-1. Положи mp3 в `songs`, например `my_song.mp3`.
-2. Открой `config.py` обычным Блокнотом и найди блок `TRACKS`. Измени одну из строк `Track(...)`:
+1. Put your mp3 into `songs`, for example `my_song.mp3`.
+2. Open `config.py` in Notepad, find the `TRACKS` block and change one of the `Track(...)` lines:
 
-       Track("Моя песня", "my_song.mp3", bpm=120, offset=0.0, duration=200)
+       Track("My Song", "my_song.mp3", bpm=120, offset=0.0, duration=200)
 
-3. Что здесь значит:
-   - `"Моя песня"` название в меню;
-   - `"my_song.mp3"` имя файла из папки `songs`;
-   - `bpm` темп песни (ударов в минуту). Его можно узнать на сайтах «tap tempo» или «song BPM»: нажимай в такт музыке;
-   - `offset` через сколько секунд от начала файла приходится первый удар. Для начала поставь `0.0`; если ноты опаздывают или спешат, меняй на 0.05–0.3;
-   - `duration` длина песни в секундах (посмотри в свойствах файла: 3:20 это 200 секунд).
-4. Сохрани файл и запусти игру.
+3. What the values mean:
+   - `"My Song"` the title shown in the menu;
+   - `"my_song.mp3"` the file name inside `songs`;
+   - `bpm` the tempo in beats per minute (find it with a "tap tempo" or "song BPM" website: tap along with the music);
+   - `offset` seconds from the start of the file to the first beat. Start with `0.0`; if the notes come late or early, try 0.05 to 0.3;
+   - `duration` song length in seconds (check the file properties: 3:20 is 200 seconds).
+4. Save the file and start the game.
 
-### Стемы: ударные только при точных попаданиях (необязательно)
+### Stems: drums only on accurate hits (optional)
 
-Без стемов тоже можно играть: песня просто становится тише, пока ты промахиваешься. Чтобы ударные звучали отдельно, один раз выполни в командной строке:
+You can play without stems: the song just gets quieter while you miss. To have the drums as a separate track, run this once in the command line:
 
     pip install scipy
     python tools/make_stems.py songs/funeral_of_hearts.mp3
 
-Для этого нужна программа **ffmpeg** (в Windows: `winget install ffmpeg`, затем закрой и открой командную строку заново). Скрипт создаст папку `songs/stems` с двумя файлами для песни. Повтори команду для каждой песни. Разделение простое, поэтому ударные могут звучать неидеально.
+This needs the **ffmpeg** program (Windows: `winget install ffmpeg`, then close and reopen the command line). The script creates a `songs/stems` folder with two files per song. Repeat the command for each song. The separation is simple, so the drums may not sound perfect.
 
-## Если что-то не работает
+## Troubleshooting
 
-| Проблема | Что сделать |
+| Problem | What to do |
 |---|---|
-| `python` не найден | Переустанови Python и поставь галочку «Add python.exe to PATH», затем открой новую командную строку. |
-| `pip` не найден | Попробуй `python -m pip install -r requirements.txt`. |
-| Чёрный экран или нет камеры | Закрой Zoom, Teams и другие программы, которые держат камеру. Попробуй `python main.py --camera 1`. |
-| Игра лагает | Закрой лишние программы. Запусти `python main.py --imgsz 256`. Если есть видеокарта NVIDIA: `python main.py --device cuda:0`. В углу экрана видно FPS и время модели. |
-| Щипок не срабатывает или срабатывает сам | Включи индикатор клавишей **P**, добавь света, меняй чувствительность клавишами **[** и **]**. |
-| Курсор дрожит | Положи локоть на стол, не загораживай ладонь, добавь света. |
-| Ноты идут не в такт музыке | Поправь `audio_offset_s` в `config.py` или запусти `python main.py --audio-offset 0.05`. |
-| Нужно просто проверить, что всё установилось | Запусти `python main.py --mouse`. |
+| `python` is not found | Reinstall Python and tick "Add python.exe to PATH", then open a new command line. |
+| `pip` is not found | Try `python -m pip install -r requirements.txt`. |
+| Black screen or no camera | Close Zoom, Teams and other programs that hold the camera. Try `python main.py --camera 1`. |
+| The game lags | Close other programs. Run `python main.py --imgsz 256`. With an NVIDIA graphics card: `python main.py --device cuda:0`. FPS and model time are shown in the corner of the screen. |
+| The pinch does not register or fires by itself | Turn on the meter with **P**, add light, change sensitivity with **[** and **]**. |
+| The cursor shakes | Rest your elbow on the table, keep your palm uncovered, add light. |
+| Notes are out of time with the music | Change `audio_offset_s` in `config.py` or run `python main.py --audio-offset 0.05`. |
+| You only want to check that the installation worked | Run `python main.py --mouse`. |
 
-Окно игры закрывается клавишей **Esc**. Остановить программу в командной строке можно сочетанием **Ctrl+C**.
+Close the game window with **Esc**. Stop the program in the command line with **Ctrl+C**.
 
-## Что внутри (коротко)
+## What is inside (short)
 
-- `main.py` запуск, меню и игровой цикл;
-- `hand_tracker.py` камера и нейросеть `best.pt`;
-- `input_pipeline.py` щипок и курсор, `smoothing.py` сглаживание (фильтр Калмана);
-- `game.py` ноты, тайминг и счёт, `render.py` вся графика;
-- `config.py` все настройки: песни, темп, чувствительность;
-- `tests/` проверки без камеры и звука: `python tests/test_core.py`, `python tests/test_yolo_tracker.py`, `python tests/test_app_smoke.py`.
+- `main.py` startup, menu and game loop;
+- `hand_tracker.py` camera and the `best.pt` neural network;
+- `input_pipeline.py` pinch and cursor, `smoothing.py` smoothing (Kalman filter);
+- `game.py` notes, timing and score, `render.py` all graphics;
+- `config.py` all settings: songs, tempo, sensitivity;
+- `tests/` checks that need no camera or sound: `python tests/test_core.py`, `python tests/test_yolo_tracker.py`, `python tests/test_app_smoke.py`.
 
-Подробности для разработчиков на английском ниже.
+More details for developers below.
 
 ---
 
-## For developers (English)
+## For developers
 
-### Lovemetal (Osu! CV)
+### Technical reference
 
 Hand-tracked gothic rhythm game: YOLOv8-pose (`best.pt`, 21 hand keypoints) + OpenCV + Pygame.
 
